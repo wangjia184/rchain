@@ -1,8 +1,16 @@
 //scalapackage coop.rchain.rholang
 
-new assert(`rho:test:assert`), assertEquals(`rho:test:assertEquals`)  in {
+new assert(`rho:test:assertAck`),
+    testCompleted(`rho:test:testSuiteCompleted`),
+    ack
+in {
+  assert!("false should fail", false, "clue assertTrue", *ack) |
 
-  assert!("false should fail", false) |
+  for (_ <- ack) {
+    assert!("0 != 1 should fail", (0, "==", 1), "clue assertEquals", *ack) |
 
-  assertEquals!("0 != 1 should fail", 0, "==", 1)
+    for (_ <- ack) {
+      testCompleted!(true)
+    }
+  }
 }
