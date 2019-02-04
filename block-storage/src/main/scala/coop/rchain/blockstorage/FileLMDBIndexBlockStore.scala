@@ -338,7 +338,7 @@ object FileLMDBIndexBlockStore {
       )
     } yield result: BlockStore[F]).value
 
-  def create[F[_]: Monad: Concurrent: Capture: Log](
+  def create[F[_]: Concurrent: Capture: Log](
       config: Config
   ): F[StorageErr[BlockStore[F]]] =
     for {

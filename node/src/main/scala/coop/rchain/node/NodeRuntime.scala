@@ -1,7 +1,6 @@
 package coop.rchain.node
 
 import scala.concurrent.duration._
-
 import cats._
 import cats.data._
 import cats.effect._
@@ -9,14 +8,8 @@ import cats.effect.concurrent.{Ref, Semaphore}
 import cats.syntax.applicative._
 import cats.syntax.apply._
 import cats.syntax.functor._
-
 import coop.rchain.blockstorage.BlockStore.BlockHash
-import coop.rchain.blockstorage.{
-  BlockDagFileStorage,
-  BlockStore,
-  InMemBlockDagStorage,
-  InMemBlockStore
-}
+import coop.rchain.blockstorage._
 import coop.rchain.casper._
 import coop.rchain.casper.MultiParentCasperRef.MultiParentCasperRef
 import coop.rchain.casper.protocol.BlockMessage
@@ -40,7 +33,6 @@ import coop.rchain.p2p.effects._
 import coop.rchain.rholang.interpreter.Runtime
 import coop.rchain.shared._
 import coop.rchain.shared.PathOps._
-
 import com.typesafe.config.ConfigFactory
 import kamon._
 import kamon.system.SystemMetrics
@@ -319,6 +311,7 @@ class NodeRuntime private[node] (
     labEff               = LastApprovedBlock.eitherTLastApprovedBlock[CommError, Task](Monad[Task], lab)
     commTmpFolder        = conf.server.dataDir.resolve("tmp").resolve("comm")
     _                    <- commTmpFolder.deleteDirectory[Task]().toEffect
+    logEffect            = Log.eitherTLog[CommError, Task](Monad[Task], log)
     transport = effects.tcpTransportLayer(
       port,
       conf.tls.certificate,
@@ -338,18 +331,26 @@ class NodeRuntime private[node] (
                       .toEffect
     // TODO: This change is temporary until itegulov's BlockStore implementation is in
     blockMap <- Ref.of[Effect, Map[BlockHash, BlockMessage]](Map.empty[BlockHash, BlockMessage])
-    blockStore = InMemBlockStore.create[Effect](
-      syncEffect,
-      blockMap,
-      Metrics.eitherT(Monad[Task], metrics)
-    )
-    blockDagStorage <- InMemBlockDagStorage.create[Effect](
+    blockStoreEither <- FileLMDBIndexBlockStore.create[Effect](conf.blockstorage)(
+                         Concurrent[Effect],
+                         Capture[Effect],
+                         logEffect
+                       )
+    blockStore <- blockStoreEither match {
+                   case Right(store) =>
+                     store.pure[Effect]
+                   case Left(error) =>
+                     EitherT[Task, CommError, BlockStore[Effect]](
+                       log.error(error.message) *> Sync[Task].raiseError(error)
+                     )
+                 }
+    blockDagStorage <- BlockDagFileStorage.create[Effect](conf.blockDagStorage)(
                         Concurrent[Effect],
-                        Sync[Effect],
-                        Log.eitherTLog(Monad[Task], log),
+                        syncEffect,
+                        logEffect,
                         blockStore
                       )
-    _      <- blockStore.clear() // TODO: Replace with a proper casper init when it's available
+//    _      <- blockStore.clear() // TODO: Replace with a proper casper init when it's available
     oracle = SafetyOracle.cliqueOracle[Effect](Monad[Effect], Log.eitherTLog(Monad[Task], log))
     runtime <- {
       implicit val s = rspaceScheduler
