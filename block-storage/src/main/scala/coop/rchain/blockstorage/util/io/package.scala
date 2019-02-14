@@ -55,7 +55,7 @@ package object io {
           RaiseIOError[F].raise[A](UnsupportedFileOperation(e))
         case e: IllegalArgumentException =>
           RaiseIOError[F].raise[A](IllegalFileOperation(e))
-        case e =>
+        case NonFatal(e) =>
           RaiseIOError[F].raise[A](UnexpectedIOError(e))
       }
     }.flatten
