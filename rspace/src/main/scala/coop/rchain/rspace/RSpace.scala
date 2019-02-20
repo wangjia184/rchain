@@ -73,7 +73,7 @@ class RSpace[F[_], C, P, E, A, R, K] private[rspace] (
             consumeLock(channels) {
               span.mark("consume-lock-acquired")
               logger.debug(s"""|consume: searching for data matching <patterns: $patterns>
-                             |at <channels: $channels>""".stripMargin.replace('\n', ' '))
+                                 |at <channels: $channels>""".stripMargin.replace('\n', ' '))
 
               span.mark("before-event-log-lock-acquired")
               eventLog.update(consumeRef +: _)
@@ -96,65 +96,67 @@ class RSpace[F[_], C, P, E, A, R, K] private[rspace] (
 
               span.mark("before-extract-data-candidates")
               val options: F[Either[E, Option[Seq[DataCandidate[C, R]]]]] =
-                extractDataCandidates(channels.zip(patterns), channelToIndexedData, Nil)
-                  .map(Traverse[Seq].sequence(_).map(Traverse[Seq].sequence(_)))
+                extractDataCandidates(channels.zip(patterns), channelToIndexedData, Nil).map {
+                  _.sequence.map(_.sequence)
+                }
 
-              options.map {
+              options.flatMap {
                 case Left(e) =>
-                  Left(e)
+                  syncF.pure(Left(e))
                 case Right(None) =>
-                  span.mark("acquire-write-lock")
+                  syncF.delay {
+                    span.mark("acquire-write-lock")
+                    store
+                      .withTxn(store.createTxnWrite()) { txn =>
+                        span.mark("before-put-continuation")
+                        store.putWaitingContinuation(
+                          txn,
+                          channels,
+                          WaitingContinuation(patterns, continuation, persist, consumeRef)
+                        )
+                        span.mark("after-put-continuation")
+                        for (channel <- channels)
+                          store.addJoin(txn, channel, channels)
+                      }
+                    logger.debug(s"""|consume: no data found,
+                                       |storing <(patterns, continuation): ($patterns, $continuation)>
+                                       |at <channels: $channels>""".stripMargin.replace('\n', ' '))
+                    Right(None)
+                  }
 
-                  store
-                    .withTxn(store.createTxnWrite()) { txn =>
-                      span.mark("before-put-continuation")
-                      store.putWaitingContinuation(
-                        txn,
-                        channels,
-                        WaitingContinuation(patterns, continuation, persist, consumeRef)
-                      )
-                      span.mark("after-put-continuation")
-                      for (channel <- channels)
-                        store.addJoin(txn, channel, channels)
-                    }
-                  logger.debug(s"""|consume: no data found,
-                                 |storing <(patterns, continuation): ($patterns, $continuation)>
-                                 |at <channels: $channels>""".stripMargin.replace('\n', ' '))
-                  Right(None)
                 case Right(Some(dataCandidates)) =>
-                  consumeCommCounter.increment()
-
-                  span.mark("before-event-log-update")
-                  eventLog.update(COMM(consumeRef, dataCandidates.map(_.datum.source)) +: _)
-                  span.mark("event-log-updated")
-
-                  dataCandidates
-                    .sortBy(_.datumIndex)(Ordering[Int].reverse)
-                    .foreach {
-                      case DataCandidate(candidateChannel, Datum(_, persistData, _), dataIndex)
-                          if !persistData =>
-                        span.mark("acquire-write-lock")
-                        store.withTxn(store.createTxnWrite()) { txn =>
-                          span.mark("before-remove-datum")
-                          store.removeDatum(txn, Seq(candidateChannel), dataIndex)
-                          span.mark("after-remove-datum")
-                        }
-                      case _ =>
-                        ()
-                    }
-                  logger.debug(
-                    s"consume: data found for <patterns: $patterns> at <channels: $channels>"
-                  )
-                  val contSequenceNumber: Int = nextSequenceNumber(consumeRef, dataCandidates)
-                  Right(
-                    Some(
-                      (
-                        ContResult(continuation, persist, channels, patterns, contSequenceNumber),
-                        dataCandidates.map(dc => Result(dc.datum.a, dc.datum.persist))
+                  syncF.delay {
+                    consumeCommCounter.increment()
+                    span.mark("before-event-log-update")
+                    eventLog.update(COMM(consumeRef, dataCandidates.map(_.datum.source)) +: _)
+                    span.mark("event-log-updated")
+                    dataCandidates
+                      .sortBy(_.datumIndex)(Ordering[Int].reverse)
+                      .foreach {
+                        case DataCandidate(candidateChannel, Datum(_, persistData, _), dataIndex)
+                            if !persistData =>
+                          span.mark("acquire-write-lock")
+                          store.withTxn(store.createTxnWrite()) { txn =>
+                            span.mark("before-remove-datum")
+                            store.removeDatum(txn, Seq(candidateChannel), dataIndex)
+                            span.mark("after-remove-datum")
+                          }
+                        case _ =>
+                          ()
+                      }
+                    logger.debug(
+                      s"consume: data found for <patterns: $patterns> at <channels: $channels>"
+                    )
+                    val contSequenceNumber: Int = nextSequenceNumber(consumeRef, dataCandidates)
+                    Right(
+                      Some(
+                        (
+                          ContResult(continuation, persist, channels, patterns, contSequenceNumber),
+                          dataCandidates.map(dc => Result(dc.datum.a, dc.datum.persist))
+                        )
                       )
                     )
-                  )
-
+                  }
               }
             }
           }
@@ -242,8 +244,8 @@ class RSpace[F[_], C, P, E, A, R, K] private[rspace] (
 
             span.mark("extract-produce-candidate")
             extractProduceCandidate(groupedChannels, channel, Datum(data, persist, produceRef))
-              .map {
-                case Left(e) => Left(e)
+              .flatMap {
+                case Left(e) => syncF.pure(Left(e))
                 case Right(
                     Some(
                       ProduceCandidate(
@@ -254,59 +256,62 @@ class RSpace[F[_], C, P, E, A, R, K] private[rspace] (
                       )
                     )
                     ) =>
-                  produceCommCounter.increment()
-                  eventLog.update(COMM(consumeRef, dataCandidates.map(_.datum.source)) +: _)
-                  if (!persistK) {
-                    span.mark("acquire-write-lock")
-                    store.withTxn(store.createTxnWrite()) { txn =>
-                      span.mark("before-remove-continuation")
-                      store.removeWaitingContinuation(txn, channels, continuationIndex)
-                      span.mark("after-remove-continuation")
-                    }
-                  }
-
-                  dataCandidates.sortBy(_.datumIndex)(Ordering[Int].reverse).foreach {
-                    case DataCandidate(candidateChannel, Datum(_, persistData, _), dataIndex) =>
+                  syncF.delay {
+                    produceCommCounter.increment()
+                    eventLog.update(COMM(consumeRef, dataCandidates.map(_.datum.source)) +: _)
+                    if (!persistK) {
                       span.mark("acquire-write-lock")
                       store.withTxn(store.createTxnWrite()) { txn =>
-                        if (!persistData && dataIndex >= 0) {
-                          span.mark("before-remove-datum")
-                          store.removeDatum(txn, Seq(candidateChannel), dataIndex)
-                          span.mark("after-remove-datum")
-                        }
-                        span.mark("before-remove-join")
-                        store.removeJoin(txn, candidateChannel, channels)
-                        span.mark("remove-join")
+                        span.mark("before-remove-continuation")
+                        store.removeWaitingContinuation(txn, channels, continuationIndex)
+                        span.mark("after-remove-continuation")
                       }
-                  }
-                  logger.debug(s"produce: matching continuation found at <channels: $channels>")
-                  val contSequenceNumber: Int = nextSequenceNumber(consumeRef, dataCandidates)
-                  Right(
-                    Some(
-                      (
-                        ContResult[C, P, K](
-                          continuation,
-                          persistK,
-                          channels,
-                          patterns,
-                          contSequenceNumber
-                        ),
-                        dataCandidates.map(dc => Result(dc.datum.a, dc.datum.persist))
+                    }
+
+                    dataCandidates.sortBy(_.datumIndex)(Ordering[Int].reverse).foreach {
+                      case DataCandidate(candidateChannel, Datum(_, persistData, _), dataIndex) =>
+                        span.mark("acquire-write-lock")
+                        store.withTxn(store.createTxnWrite()) { txn =>
+                          if (!persistData && dataIndex >= 0) {
+                            span.mark("before-remove-datum")
+                            store.removeDatum(txn, Seq(candidateChannel), dataIndex)
+                            span.mark("after-remove-datum")
+                          }
+                          span.mark("before-remove-join")
+                          store.removeJoin(txn, candidateChannel, channels)
+                          span.mark("remove-join")
+                        }
+                    }
+                    logger.debug(s"produce: matching continuation found at <channels: $channels>")
+                    val contSequenceNumber: Int = nextSequenceNumber(consumeRef, dataCandidates)
+                    Right(
+                      Some(
+                        (
+                          ContResult[C, P, K](
+                            continuation,
+                            persistK,
+                            channels,
+                            patterns,
+                            contSequenceNumber
+                          ),
+                          dataCandidates.map(dc => Result(dc.datum.a, dc.datum.persist))
+                        )
                       )
                     )
-                  )
+                  }
 
                 case Right(None) =>
-                  logger.debug(s"produce: no matching continuation found")
-                  span.mark("acquire-write-lock")
-                  store.withTxn(store.createTxnWrite()) { txn =>
-                    span.mark("before-put-datum")
-                    store.putDatum(txn, Seq(channel), Datum(data, persist, produceRef))
-                    span.mark("after-put-datum")
+                  syncF.delay {
+                    logger.debug(s"produce: no matching continuation found")
+                    span.mark("acquire-write-lock")
+                    store.withTxn(store.createTxnWrite()) { txn =>
+                      span.mark("before-put-datum")
+                      store.putDatum(txn, Seq(channel), Datum(data, persist, produceRef))
+                      span.mark("after-put-datum")
+                    }
+                    logger.debug(s"produce: persisted <data: $data> at <channel: $channel>")
+                    Right(None)
                   }
-                  logger.debug(s"produce: persisted <data: $data> at <channel: $channel>")
-                  Right(None)
-
               }
           }
         }

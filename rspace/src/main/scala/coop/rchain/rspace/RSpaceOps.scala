@@ -1,11 +1,9 @@
 package coop.rchain.rspace
 
-import cats.Traverse
 import cats.effect.Sync
 import cats.implicits._
 import com.typesafe.scalalogging.Logger
-import coop.rchain.catscontrib._
-import ski._
+import coop.rchain.catscontrib._, ski._
 import coop.rchain.rspace.concurrent.{DefaultTwoStepLock, TwoStepLock}
 import coop.rchain.rspace.history.{Branch, Leaf}
 import coop.rchain.rspace.internal._
@@ -13,7 +11,6 @@ import coop.rchain.rspace.trace.Consume
 import coop.rchain.shared.SyncVarOps._
 import kamon._
 import kamon.trace.Tracer.SpanBuilder
-
 import scala.collection.immutable.Seq
 import scala.concurrent.SyncVar
 import scala.util.Random
@@ -34,27 +31,25 @@ abstract class RSpaceOps[F[_], C, P, E, A, R, K](
 
   private val lock: TwoStepLock[Blake2b256Hash] = new DefaultTwoStepLock()
 
-  protected[this] def consumeLock(
-      channels: Seq[C]
-  )(
+  protected[this] def consumeLock(channels: Seq[C])(
       thunk: => F[Either[E, Option[(ContResult[C, P, K], Seq[Result[R]])]]]
-  ): F[Either[E, Option[(ContResult[C, P, K], Seq[Result[R]])]]] = {
+  ): F[Either[E, Option[(ContResult[C, P, K], Seq[Result[R]])]]] = syncF.defer {
     val hashes = channels.map(ch => StableHashProvider.hash(ch))
     lock.acquire(hashes)(() => hashes)(thunk)
   }
 
-  protected[this] def produceLock(
-      channel: C
-  )(
+  protected[this] def produceLock(channel: C)(
       thunk: => F[Either[E, Option[(ContResult[C, P, K], Seq[Result[R]])]]]
   ): F[Either[E, Option[(ContResult[C, P, K], Seq[Result[R]])]]] =
-    lock.acquire(Seq(StableHashProvider.hash(channel)))(
-      () =>
-        store.withTxn(store.createTxnRead()) { txn =>
-          val groupedChannels: Seq[Seq[C]] = store.getJoin(txn, channel)
-          groupedChannels.flatten.map(StableHashProvider.hash(_))
-        }
-    )(thunk)
+    syncF.defer {
+      lock.acquire(Seq(StableHashProvider.hash(channel)))(
+        () =>
+          store.withTxn(store.createTxnRead()) { txn =>
+            val groupedChannels: Seq[Seq[C]] = store.getJoin(txn, channel)
+            groupedChannels.flatten.map(StableHashProvider.hash(_))
+          }
+      )(thunk)
+    }
 
   protected[this] val logger: Logger
   protected[this] val installSpan: SpanBuilder
@@ -65,10 +60,12 @@ abstract class RSpaceOps[F[_], C, P, E, A, R, K](
     installs
   }
 
-  protected[this] def restoreInstalls(txn: store.Transaction): Unit =
-    installs.get.foreach {
-      case (channels, Install(patterns, continuation, _match)) =>
-        install(txn, channels, patterns, continuation)(_match)
+  protected[this] def restoreInstalls(txn: store.Transaction): F[Unit] =
+    syncF.delay {
+      installs.get.foreach {
+        case (channels, Install(patterns, continuation, _match)) =>
+          install(txn, channels, patterns, continuation)(_match)
+      }
     }
 
   @SuppressWarnings(Array("org.wartremover.warts.Throw"))
@@ -79,13 +76,15 @@ abstract class RSpaceOps[F[_], C, P, E, A, R, K](
       patterns: Seq[P],
       continuation: K
   )(implicit m: Match[F, P, E, A, R]): F[Option[(K, Seq[R])]] = {
+
     if (channels.length =!= patterns.length) {
       val msg = "channels.length must equal patterns.length"
       logger.error(msg)
-      throw new IllegalArgumentException(msg)
+      syncF.raiseError(new IllegalArgumentException(msg))
     }
+
     logger.debug(s"""|install: searching for data matching <patterns: $patterns>
-                     |at <channels: $channels>""".stripMargin.replace('\n', ' '))
+                       |at <channels: $channels>""".stripMargin.replace('\n', ' '))
 
     val consumeRef = Consume.create(channels, patterns, continuation, true, 0)
 
@@ -103,8 +102,9 @@ abstract class RSpaceOps[F[_], C, P, E, A, R, K](
     }.toMap
 
     val options: F[Either[E, Option[Seq[DataCandidate[C, R]]]]] =
-      extractDataCandidates(channels.zip(patterns), channelToIndexedData, Nil)
-        .map(Traverse[Seq].sequence(_).map(Traverse[Seq].sequence(_)))
+      extractDataCandidates(channels.zip(patterns), channelToIndexedData, Nil).map {
+        _.sequence.map(_.sequence)
+      }
 
     options.flatMap {
       case Left(e) =>
@@ -119,7 +119,7 @@ abstract class RSpaceOps[F[_], C, P, E, A, R, K](
           )
           for (channel <- channels) store.addJoin(txn, channel, channels)
           logger.debug(s"""|storing <(patterns, continuation): ($patterns, $continuation)>
-                           |at <channels: $channels>""".stripMargin.replace('\n', ' '))
+                               |at <channels: $channels>""".stripMargin.replace('\n', ' '))
           None
         }
       case Right(Some(_)) =>
@@ -162,7 +162,7 @@ abstract class RSpaceOps[F[_], C, P, E, A, R, K](
     }
 
   override def clear(): F[Unit] =
-    syncF.suspend {
+    syncF.defer {
       val root = store.withTxn(store.createTxnRead()) { txn =>
         store.withTrieTxn(txn) { trieTxn =>
           store.trieStore.getEmptyRoot(trieTxn)
