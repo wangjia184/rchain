@@ -15,7 +15,6 @@ import coop.rchain.crypto.codec.Base16
 import coop.rchain.crypto.hash.Blake2b512Random
 import coop.rchain.models.Expr.ExprInstance.GString
 import coop.rchain.models._
-import coop.rchain.rholang.interpreter.Interpreter
 import coop.rchain.rholang.interpreter.accounting._
 import coop.rchain.rholang.interpreter.storage.StoragePrinter
 import coop.rchain.rholang.interpreter.{
@@ -23,9 +22,9 @@ import coop.rchain.rholang.interpreter.{
   ChargingReducer,
   ErrorLog,
   EvaluateResult,
+  Interpreter,
   Runtime
 }
-import coop.rchain.rspace.internal.Datum
 import coop.rchain.rspace.{Blake2b256Hash, ReplayException}
 import coop.rchain.shared.Log
 
@@ -33,7 +32,11 @@ import scala.collection.immutable
 import scala.concurrent.duration.Duration
 
 trait RuntimeManager[F[_]] {
-  def captureResults(start: StateHash, deploy: DeployData, name: String = "__SCALA__"): F[Seq[Par]]
+  def captureResults(
+      start: StateHash,
+      deploy: DeployData,
+      name: String = "__SCALA__"
+  ): F[Seq[Par]]
   def captureResults(start: StateHash, deploy: DeployData, name: Par): F[Seq[Par]]
   def replayComputeState(
       hash: StateHash,
@@ -68,20 +71,16 @@ class RuntimeManagerImpl[F[_]: Concurrent: Log] private[rholang] (
     captureResults(start, deploy, Par().withExprs(Seq(Expr(GString(name)))))
 
   def captureResults(start: StateHash, deploy: DeployData, name: Par): F[Seq[Par]] =
-    Sync[F]
-      .bracket(runtimeContainer.take) { runtime =>
-        //TODO: Is better error handling needed here?
-        for {
-          evalR                     <- newEval(deploy :: Nil, runtime, start)
-          (_, Seq(processedDeploy)) = evalR
-          result <- if (processedDeploy.status.isFailed) Seq.empty[Datum[ListParWithRandom]].pure[F]
-                   else {
-                     val r: F[Seq[Datum[ListParWithRandom]]] =
-                       runtime.space.getData(name).map(_.toSeq)
-                     r
-                   }
-        } yield result.flatMap(_.a.pars)
-      }(runtime => runtimeContainer.put(runtime))
+    Sync[F].bracket(runtimeContainer.take) { runtime =>
+      for {
+        _                                        <- runtime.space.reset(Blake2b256Hash.fromByteArray(start.toByteArray))
+        (codeHash, phloPrice, userId, timestamp) = ProtoUtil.getRholangDeployParams(deploy)
+        _                                        <- runtime.shortLeashParams.setParams(codeHash, phloPrice, userId, timestamp)
+        evaluateResult                           <- doInj(deploy, runtime.reducer, runtime.errorLog)(runtime.cost)
+        values                                   <- runtime.space.getData(name).map(_.flatMap(_.a.pars))
+        result                                   = if (evaluateResult.errors.nonEmpty) Seq.empty[Par] else values
+      } yield result
+    }(runtimeContainer.put)
 
   def replayComputeState(
       hash: StateHash,
@@ -359,13 +358,13 @@ object RuntimeManager {
           start: RuntimeManager.StateHash,
           deploy: DeployData,
           name: String
-      ): T[F, scala.Seq[Par]] = runtimeManager.captureResults(start, deploy, name).liftM[T]
+      ): T[F, Seq[Par]] = runtimeManager.captureResults(start, deploy, name).liftM[T]
 
       override def captureResults(
           start: RuntimeManager.StateHash,
           deploy: DeployData,
           name: Par
-      ): T[F, scala.Seq[Par]] = runtimeManager.captureResults(start, deploy, name).liftM[T]
+      ): T[F, Seq[Par]] = runtimeManager.captureResults(start, deploy, name).liftM[T]
 
       override def replayComputeState(
           hash: RuntimeManager.StateHash,

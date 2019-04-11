@@ -1,9 +1,8 @@
 package coop.rchain.casper.util.rholang
 
-import coop.rchain.casper.ConstructDeploy
 import cats.Id
 import cats.effect.Resource
-import coop.rchain.catscontrib.TaskContrib._
+import coop.rchain.casper.ConstructDeploy
 import coop.rchain.casper.genesis.contracts.StandardDeploys
 import coop.rchain.casper.protocol.DeployData
 import coop.rchain.casper.util.ProtoUtil
@@ -14,8 +13,8 @@ import coop.rchain.metrics
 import coop.rchain.metrics.Metrics
 import coop.rchain.p2p.EffectsTestInstances.LogicalTime
 import coop.rchain.rholang.Resources.mkRuntime
-import coop.rchain.rholang.interpreter.{accounting, ParBuilder}
 import coop.rchain.rholang.interpreter.accounting.Cost
+import coop.rchain.rholang.interpreter.{ParBuilder, accounting}
 import coop.rchain.shared.Log
 import monix.eval.Task
 import monix.execution.Scheduler.Implicits.global
