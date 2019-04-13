@@ -13,18 +13,20 @@ import coop.rchain.catscontrib.Catscontrib._
 import coop.rchain.catscontrib.MonadTrans
 import coop.rchain.crypto.codec.Base16
 import coop.rchain.crypto.hash.Blake2b512Random
-import coop.rchain.models.Expr.ExprInstance.GString
+import coop.rchain.models.Expr.ExprInstance.{GBool, GInt, GString}
 import coop.rchain.models._
 import coop.rchain.rholang.interpreter.accounting._
+import coop.rchain.rholang.interpreter.errors.BugFoundError
 import coop.rchain.rholang.interpreter.storage.StoragePrinter
 import coop.rchain.rholang.interpreter.{
-  accounting,
-  ChargingReducer,
-  ErrorLog,
-  EvaluateResult,
-  Interpreter,
-  Runtime
-}
+    ChargingReducer,
+    ErrorLog,
+    EvaluateResult,
+    Interpreter,
+    Runtime,
+    accounting,
+    PrettyPrinter => RholangPrinter
+  }
 import coop.rchain.rspace.{Blake2b256Hash, ReplayException}
 import coop.rchain.shared.Log
 
@@ -205,6 +207,95 @@ class RuntimeManagerImpl[F[_]: Concurrent: Log] private[rholang] (
       initHash: StateHash
   ): F[(StateHash, Seq[InternalProcessedDeploy])] = {
 
+    def computeUserBalance(start: Blake2b256Hash, user: ByteString): F[Long] = {
+
+      val balanceQuerySource: String =
+        s"""
+           | new rl(`rho:registry:lookup`), revAddressOps(`rho:rev:address`), revAddressCh in {
+           |   revAddressOps!("fromPublicKey", "${Base16.encode(user.toByteArray)}".hexToBytes(), *revAddressCh)
+           |   | rl!(`rho:id:1o93uitkrjfubh43jt19owanuezhntag5wh74c6ur5feuotpi73q8z`, *revVaultCh)
+           |   | for (@(_, RevVault) <- revVaultCh; revAddress <- revAddressCh) {
+           |     new vaultCh in {
+           |       @RevVault!("findOrCreate", revAddress, *vaultCh)
+           |       | for(@vaultEither <- vaultCh){
+           |         match vaultEither {
+           |           (true, vault) => {
+           |             @vault!("balance", "__SCALA__")
+           |           }
+           |           (false, error) => {
+           |             @"__SCALA__"!(error)
+           |           }
+           |         }
+           |       }
+           |     }
+           |   }
+           | }
+     """.stripMargin
+
+      captureResults(
+        ByteString.copyFrom(start.bytes.toArray),
+        DeployData(
+          deployer = user,
+          term = balanceQuerySource,
+          phloLimit = Long.MaxValue
+        )
+      ) >>= { results =>
+        results.head.exprs.head.exprInstance match {
+          case GInt(balance) => balance.pure[F]
+          case GString(error) =>
+            BugFoundError(s"Balance query failed unexpectedly: $error").raiseError[F, Long]
+          case _ =>
+            BugFoundError(
+              s"Balance query returned unexpected result: ${results.map(RholangPrinter().buildString)}"
+            ).raiseError[F, Long]
+        }
+      }
+    }
+
+    /**
+      * FIXME: Since "__SCALA__" is a public name, the result of this code can be
+      *        intercepted and/or forged. Require a more general method to return
+      *        results to an unforgeable name known only by the runtime manager.
+      *        Or, perhaps clear the "__SCALA__" channel after each evaluation.
+      *
+      * @note This function assumes that PoS.pay always halts. This justifies the maximum
+      *       value phlo limit. It also assumes that all deploys are valid at this stage
+      *       of execution, such that PoS.pay should always succeed.
+      *
+      */
+    def payForDeploy(start: Blake2b256Hash, user: ByteString, cost: Cost): F[Unit] = {
+
+      val payDeploySource: String =
+        s"""
+           | new rl(`rho:registry:lookup`), PoSCh in {
+           |   rl!(`rho:id:cnec3pa8prp4out3yc8facon6grm3xbsotpd4ckjfx8ghuw77xadzt`, *PosCh) |
+           |   for(@(_, PoS) <- PosCh) {
+           |     @PoS!("pay", ${cost.value}, "__SCALA__")
+           |   }
+           | }
+       """.stripMargin
+
+      captureResults(
+        ByteString.copyFrom(start.bytes.toArray),
+        DeployData(
+          deployer = user,
+          term = payDeploySource,
+          phloLimit = Long.MaxValue
+        )
+      ) >>= { results =>
+        results.map(_.exprs.head.exprInstance) match {
+          case Seq(GBool(true)) => ().pure[F]
+          case Seq(GBool(false), GString(error)) =>
+            BugFoundError(s"Deploy payment failed unexpectedly: $error")
+              .raiseError[F, Unit]
+          case _ =>
+            BugFoundError(
+              s"Deploy payment returned unexpected result: ${results.map(RholangPrinter().buildString)}"
+            ).raiseError[F, Unit]
+        }
+      }
+    }
+
     def doEval(
         terms: Seq[DeployData],
         hash: Blake2b256Hash,
@@ -318,7 +409,6 @@ class RuntimeManagerImpl[F[_]: Concurrent: Log] private[rholang] (
       reducer: ChargingReducer[F],
       errorLog: ErrorLog[F]
   )(implicit C: _cost[F]) = {
-    import coop.rchain.catscontrib.mtl.implicits._
     implicit val rand: Blake2b512Random = Blake2b512Random(
       DeployData.toByteArray(ProtoUtil.stripDeployData(deploy))
     )
