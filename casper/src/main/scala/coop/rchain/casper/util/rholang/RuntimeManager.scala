@@ -11,6 +11,7 @@ import coop.rchain.casper.util.ProtoUtil
 import coop.rchain.casper.util.rholang.RuntimeManager.StateHash
 import coop.rchain.catscontrib.Catscontrib._
 import coop.rchain.catscontrib.MonadTrans
+import coop.rchain.crypto.codec.Base16
 import coop.rchain.crypto.hash.Blake2b512Random
 import coop.rchain.models.Expr.ExprInstance.GString
 import coop.rchain.models._
@@ -26,8 +27,10 @@ import coop.rchain.rholang.interpreter.{
 }
 import coop.rchain.rspace.internal.Datum
 import coop.rchain.rspace.{Blake2b256Hash, ReplayException}
+import coop.rchain.shared.Log
 
 import scala.collection.immutable
+import scala.concurrent.duration.Duration
 
 trait RuntimeManager[F[_]] {
   def captureResults(start: StateHash, deploy: DeployData, name: String = "__SCALA__"): F[Seq[Par]]
@@ -52,7 +55,7 @@ trait RuntimeManager[F[_]] {
   def emptyStateHash: ByteString
 }
 
-class RuntimeManagerImpl[F[_]: Concurrent] private[rholang] (
+class RuntimeManagerImpl[F[_]: Concurrent: Log] private[rholang] (
     val emptyStateHash: ByteString,
     runtimeContainer: MVar[F, Runtime[F]]
 ) extends RuntimeManager[F] {
@@ -212,6 +215,11 @@ class RuntimeManagerImpl[F[_]: Concurrent] private[rholang] (
         terms match {
           case deploy +: rem =>
             for {
+              start <- Sync[F].delay(System.nanoTime)
+              _ <- Log[F].info(
+                    "Deploying:" + Base16
+                      .encode(deploy.deployer.toByteArray) + " " + deploy.timestamp
+                  )
               _ <- runtime.space.reset(hash)
               (codeHash, phloPrice, userId, timestamp) = ProtoUtil.getRholangDeployParams(
                 deploy
@@ -226,6 +234,10 @@ class RuntimeManagerImpl[F[_]: Concurrent] private[rholang] (
                 newCheckpoint.log,
                 DeployStatus.fromErrors(errors)
               )
+              end <- Sync[F].delay(System.nanoTime)
+              _ <- Log[F].info(
+                    "Whole deploy took " + Duration.fromNanos(end - start).toMillis + " ms"
+                  )
               cont <- if (errors.isEmpty)
                        doEval(rem, newCheckpoint.root, acc :+ deployResult)
                      else doEval(rem, hash, acc :+ deployResult)
@@ -337,7 +349,7 @@ object RuntimeManager {
       replayHash       = ByteString.copyFrom(replayCheckpoint.root.bytes.toArray)
       _                = assert(hash == replayHash)
       runtime          <- MVar[F].of(active)
-    } yield new RuntimeManagerImpl(hash, runtime)
+    } yield new RuntimeManagerImpl(hash, runtime)(implicitly, Log.log)
 
   def forTrans[F[_]: Monad, T[_[_], _]: MonadTrans](
       runtimeManager: RuntimeManager[F]

@@ -63,6 +63,7 @@ object RhoSpec {
   ): Task[TestResult] =
     for {
       _                   <- logger.info("Starting tests from " + testObject.path)
+      startTime           <- Task.delay { System.nanoTime() }
       testResultCollector <- TestResultCollector[Task]
 
       runtime <- TestUtil.setupRuntime[Task, Task.Par](
@@ -70,6 +71,10 @@ object RhoSpec {
                   otherLibs,
                   testFrameworkContracts(testResultCollector)
                 )
+      endTime <- Task.delay { System.nanoTime() }
+      _ <- logger.info(
+            "Startup took " + Duration.fromNanos(endTime - startTime).toMillis + " ms"
+          )
 
       rand = Blake2b512Random(128)
       _ <- TestUtil
