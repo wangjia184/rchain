@@ -33,7 +33,7 @@ class MultiParentCasperAddBlockSpec extends FlatSpec with Matchers with Inspecto
 
   private val (validatorKeys, validatorPks) = (1 to 4).map(_ => Ed25519.newKeyPair).unzip
   private val genesis = buildGenesis(
-    buildGenesisParameters(4, createBonds(validatorPks))
+    buildGenesisParameters(4, validatorPks, createBonds(validatorPks))
   )
 
   //put a new casper instance at the start of each
@@ -511,6 +511,7 @@ class MultiParentCasperAddBlockSpec extends FlatSpec with Matchers with Inspecto
                   buildGenesis(
                     buildGenesisParameters(
                       5,
+                      validatorPks,
                       Map(
                         validatorPks(0) -> 3L,
                         validatorPks(1) -> 1L,

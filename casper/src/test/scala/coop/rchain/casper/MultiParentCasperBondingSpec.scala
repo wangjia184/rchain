@@ -219,8 +219,7 @@ class MultiParentCasperBondingSpec extends FlatSpec with Matchers with Inspector
       _                  = block1Status shouldBe Valid
       _                  = block2Status shouldBe Valid
       result             = (oldBonds.size + 1) shouldBe newBonds.size
-
-      _ <- node.tearDown()
+      _                  <- node.tearDown()
     } yield result
   }
 

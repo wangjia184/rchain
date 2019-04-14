@@ -42,6 +42,12 @@ final case class ProofOfStake(minimumBond: Long, maximumBond: Long, validators: 
        | }
      """.stripMargin
 
-  lazy val term: Par = ParBuilder[Coeval].buildNormalizedTerm(code).value()
+  val term: Par = ParBuilder[Coeval].buildNormalizedTerm(code).value()
+
+}
+
+object ProofOfStake {
+
+  def empty: ProofOfStake = ProofOfStake(0L, 0L, Seq.empty)
 
 }

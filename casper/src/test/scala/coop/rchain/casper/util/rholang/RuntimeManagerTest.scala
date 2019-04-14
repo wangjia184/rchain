@@ -2,13 +2,15 @@ package coop.rchain.casper.util.rholang
 
 import cats.Id
 import cats.effect.Resource
-import coop.rchain.casper.ConstructDeploy
+import com.google.protobuf.ByteString
 import coop.rchain.casper.genesis.contracts.StandardDeploys
 import coop.rchain.casper.protocol.DeployData
 import coop.rchain.casper.util.ProtoUtil
 import coop.rchain.casper.util.rholang.Resources._
+import coop.rchain.casper.{ConstructDeploy, SignDeployment}
 import coop.rchain.catscontrib.effect.implicits._
 import coop.rchain.crypto.hash.Blake2b512Random
+import coop.rchain.crypto.signatures.Ed25519
 import coop.rchain.metrics
 import coop.rchain.metrics.Metrics
 import coop.rchain.p2p.EffectsTestInstances.LogicalTime
@@ -23,18 +25,47 @@ import org.scalatest.{FlatSpec, Matchers}
 import scala.concurrent.duration._
 
 class RuntimeManagerTest extends FlatSpec with Matchers {
+
   private val runtimeManager: Resource[Task, RuntimeManager[Task]] =
     mkRuntimeManager("casper-runtime-manager-test")
 
   "computeState" should "capture rholang errors" in {
-    val badRholang = """ for(@x <- @"x"; @y <- @"y"){ @"xy"!(x + y) } | @"x"!(1) | @"y"!("hi") """
-    val deploy     = ConstructDeploy.sourceDeployNow(badRholang)
-    val (_, Seq(result)) =
-      runtimeManager
-        .use(mgr => mgr.computeState(mgr.emptyStateHash, deploy :: Nil))
-        .runSyncUnsafe(10.seconds)
+    val (genesisSk, genesisPk) = Ed25519.newKeyPair
+    val badRholang             = """ for(@x <- @"x"; @y <- @"y"){ @"xy"!(x + y) } | @"x"!(1) | @"y"!("hi") """
+    val deploy =
+      SignDeployment.sign(
+        genesisSk,
+        ConstructDeploy
+          .sourceDeployNow(badRholang)
+          .withDeployer(ByteString.copyFrom(genesisPk.bytes))
+          .withPhloPrice(0L)
+          .withPhloLimit(100L)
+      )
 
-    result.status.isFailed should be(true)
+    val genesisTerms =
+      Seq(
+        StandardDeploys.listOps,
+        StandardDeploys.either,
+        StandardDeploys.nonNegativeNumber,
+        StandardDeploys.makeMint,
+        StandardDeploys.PoS,
+        StandardDeploys.authKey,
+        StandardDeploys.revVault,
+        StandardDeploys.revGenerator(genesisPk, Seq.empty, 111L)
+      )
+
+    runtimeManager
+      .use { mgr =>
+        for {
+          res0                      <- mgr.sequenceEffects(mgr.emptyStateHash)(genesisTerms)
+          (state0, evaluateResult0) = res0
+          _                         = evaluateResult0.errors.isEmpty should be(true)
+          res1                      <- mgr.computeState(state0, Seq(deploy))
+          (_, evaluateResult1)      = res1
+          _                         = evaluateResult1.head.status.isFailed should be(true)
+        } yield ()
+      }
+      .runSyncUnsafe(30.seconds)
   }
 
   it should "capture rholang parsing errors and charge for parsing" in {

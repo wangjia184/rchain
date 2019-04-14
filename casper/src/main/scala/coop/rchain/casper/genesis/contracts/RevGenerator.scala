@@ -13,7 +13,7 @@ final case class RevGenerator(genesisAddress: RevAddress, userVaults: Seq[Vault]
   val path: String = "<synthetic in Rev.scala>"
 
   val code: String =
-    s""" new rl(`rho:registry:lookup`), revVaultCh in {
+    s""" new rl(`rho:registry:lookup`), revVaultCh, stdout(`rho:io:stdout`) in {
        #   rl!(`rho:id:1o93uitkrjfubh43jt19owanuezhntag5wh74c6ur5feuotpi73q8z`, *revVaultCh)
        #   | for (@(_, RevVault) <- revVaultCh) {
        #     new genesisVaultCh in {
@@ -22,13 +22,13 @@ final case class RevGenerator(genesisAddress: RevAddress, userVaults: Seq[Vault]
        #         "${genesisAddress.toBase58}",
        #         $supply,
        #         *genesisVaultCh
-       #       )
+       #       ) | stdout!("started-RevVault.findOrCreateGenesisVault")
        #       | for (@(true, genesisVault) <- genesisVaultCh) {
-       #         new genesisAuthKeyCh in {
+       #         stdout!("finished-RevVault.findOrCreateGenesisVault") | new genesisAuthKeyCh in {
        #           @RevVault!("deployerAuthKey", *genesisAuthKeyCh)
        #           | for (genesisVaultAuthKey <- genesisAuthKeyCh) {
-       #             ${concatenate(findOrCreate)} |
-       #             ${concatenate(transfer)}
+       #             ${concatenate(transfer)} |
+       #             ${concatenate(_.code)}
        #           }
        #         }
        #       }
@@ -39,15 +39,6 @@ final case class RevGenerator(genesisAddress: RevAddress, userVaults: Seq[Vault]
 
   val term: Par = ParBuilder[Coeval].buildNormalizedTerm(code).value()
 
-  private def findOrCreate(userVault: Vault): String =
-    s""" 
-       # @RevVault!(
-       #   "findOrCreate",
-       #   "${userVault.revAddress.toBase58}",
-       #   Nil
-       # )
-     """.stripMargin('#')
-
   private def transfer(userVault: Vault): String =
     s"""
        # @genesisVault!(
@@ -56,7 +47,7 @@ final case class RevGenerator(genesisAddress: RevAddress, userVaults: Seq[Vault]
        #   ${userVault.initialBalance},
        #   *genesisVaultAuthKey,
        #   Nil
-       # )
+       # ) | stdout!("RevGenerator.TransferToVault")
      """.stripMargin('#')
 
   private def concatenate(f: Vault => String): String =

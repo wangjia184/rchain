@@ -153,8 +153,8 @@ new PoS, rs(`rho:registry:insertSigned:ed25519`), uriOut in {
               }
 
               | contract PoS (@"pay", @amount, return) = {
-                new parametersCh, depositRet in {
-                  deposit!(amount, *depositRet)
+                new parametersCh, depositRet, stdout(`rho:io:stdout`) in {
+                  stdout!("started-PoS.pay") | deposit!(amount, *depositRet)
                   | getParameters!(*parametersCh)
                   | for (@depositResult <- depositRet; @codeHash, @phloRate, @userPk, @timestamp <- parametersCh; lastPayment <- paymentStore) {
                     match depositResult {
