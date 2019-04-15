@@ -1,9 +1,7 @@
 package coop.rchain.casper
-
-import cats._
-import cats.implicits._
+import cats.Monad
 import com.google.protobuf.ByteString
-import coop.rchain.casper.protocol._
+import coop.rchain.casper.protocol.{DeployData, ProcessedDeploy}
 import coop.rchain.crypto.PrivateKey
 import coop.rchain.crypto.codec.Base16
 import coop.rchain.crypto.signatures.Ed25519
