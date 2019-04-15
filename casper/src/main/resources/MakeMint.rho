@@ -62,9 +62,9 @@ in {
                 @src!(bundle0{bundle0{src}|*decr}, amount, *result) | //call src decr function.
                 for(@decrSuccess, @auth <- result) {
                   if (decrSuccess and auth == *decr) {
-                    balance!("add", amount, *success) // add transferred amount to this purse
+                    balance!("add", amount, *success)// add transferred amount to this purse
                   } else {
-                    success!(false) 
+                    success!(false)
                   }
                 }
               }

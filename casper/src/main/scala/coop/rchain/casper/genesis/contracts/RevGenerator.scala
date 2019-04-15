@@ -22,9 +22,9 @@ final case class RevGenerator(genesisAddress: RevAddress, userVaults: Seq[Vault]
        #         "${genesisAddress.toBase58}",
        #         $supply,
        #         *genesisVaultCh
-       #       ) | stdout!("started-RevVault.findOrCreateGenesisVault")
+       #       ) | stdout!("started-Rev-instantiateGenesisVault")
        #       | for (@(true, genesisVault) <- genesisVaultCh) {
-       #         stdout!("finished-RevVault.findOrCreateGenesisVault") | new genesisAuthKeyCh in {
+       #         stdout!("finished-Rev-instantiateGenesisVault-success") | new genesisAuthKeyCh in {
        #           @RevVault!("deployerAuthKey", *genesisAuthKeyCh)
        #           | for (genesisVaultAuthKey <- genesisAuthKeyCh) {
        #             ${concatenate(transfer)} |
@@ -47,7 +47,7 @@ final case class RevGenerator(genesisAddress: RevAddress, userVaults: Seq[Vault]
        #   ${userVault.initialBalance},
        #   *genesisVaultAuthKey,
        #   Nil
-       # ) | stdout!("RevGenerator.TransferToVault")
+       # ) | stdout!("started-Rev-endowUserVault")
      """.stripMargin('#')
 
   private def concatenate(f: Vault => String): String =

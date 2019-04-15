@@ -3,7 +3,7 @@ package coop.rchain.casper.util.rholang
 import cats.Id
 import cats.effect.Resource
 import com.google.protobuf.ByteString
-import coop.rchain.casper.genesis.contracts.StandardDeploys
+import coop.rchain.casper.genesis.contracts.{ProofOfStake, StandardDeploys, Validator, Vault}
 import coop.rchain.casper.protocol.DeployData
 import coop.rchain.casper.util.ProtoUtil
 import coop.rchain.casper.util.rholang.Resources._
@@ -16,7 +16,8 @@ import coop.rchain.metrics.Metrics
 import coop.rchain.p2p.EffectsTestInstances.LogicalTime
 import coop.rchain.rholang.Resources.mkRuntime
 import coop.rchain.rholang.interpreter.accounting.Cost
-import coop.rchain.rholang.interpreter.{accounting, ParBuilder}
+import coop.rchain.rholang.interpreter.util.RevAddress
+import coop.rchain.rholang.interpreter.{accounting, EvaluateResult, ParBuilder}
 import coop.rchain.shared.Log
 import monix.eval.Task
 import monix.execution.Scheduler.Implicits.global
@@ -29,17 +30,18 @@ class RuntimeManagerTest extends FlatSpec with Matchers {
   private val runtimeManager: Resource[Task, RuntimeManager[Task]] =
     mkRuntimeManager("casper-runtime-manager-test")
 
-  "computeState" should "capture rholang errors" in {
-    val (genesisSk, genesisPk) = Ed25519.newKeyPair
-    val badRholang             = """ for(@x <- @"x"; @y <- @"y"){ @"xy"!(x + y) } | @"x"!(1) | @"y"!("hi") """
+  "computeState" should "charge for evaluating deployments" in {
+    val (_, genesisPk)   = Ed25519.newKeyPair
+    val (userSk, userPk) = Ed25519.newKeyPair
+    val program          = """@0!(2)"""
     val deploy =
       SignDeployment.sign(
-        genesisSk,
+        userSk,
         ConstructDeploy
-          .sourceDeployNow(badRholang)
-          .withDeployer(ByteString.copyFrom(genesisPk.bytes))
-          .withPhloPrice(0L)
-          .withPhloLimit(100L)
+          .sourceDeployNow(program)
+          .withDeployer(ByteString.copyFrom(userPk.bytes))
+          .withPhloPrice(1)
+          .withPhloLimit(45)
       )
 
     val genesisTerms =
@@ -51,7 +53,65 @@ class RuntimeManagerTest extends FlatSpec with Matchers {
         StandardDeploys.PoS,
         StandardDeploys.authKey,
         StandardDeploys.revVault,
-        StandardDeploys.revGenerator(genesisPk, Seq.empty, 111L)
+        StandardDeploys
+          .revGenerator(
+            genesisPk,
+            Seq(Vault(RevAddress.fromPublicKey(userPk).get, initialBalance = 33)),
+            supply = 100
+          ),
+        StandardDeploys
+          .poSGenerator(
+            genesisPk,
+            ProofOfStake(
+              minimumBond = 0,
+              maximumBond = Long.MaxValue,
+              Seq(Validator(genesisPk, stake = 0))
+            )
+          )
+      )
+
+    runtimeManager
+      .use { mgr =>
+        mgr.sequenceEffects(mgr.emptyStateHash)(genesisTerms).flatMap {
+          case (start, EvaluateResult(_, errors0)) =>
+            errors0.isEmpty should be(true)
+            mgr.computeState(start, Seq(deploy)).flatMap {
+              case (finish, Seq(InternalProcessedDeploy(_, cost, log, status))) =>
+                mgr.computeBalance(finish)(ByteString.copyFrom(userPk.bytes)).map { balance =>
+                  balance should be(33 - (deploy.phloPrice * cost.cost))
+                }
+            }
+        }
+      }
+      .runSyncUnsafe(30.seconds)
+
+  }
+
+  "computeState" should "capture rholang errors" in {
+    val (genesisSk, genesisPk) = Ed25519.newKeyPair
+    val badRholang             = """ for(@x <- @"x"; @y <- @"y"){ @"xy"!(x + y) } | @"x"!(1) | @"y"!("hi") """
+    val deploy =
+      SignDeployment.sign(
+        genesisSk,
+        ConstructDeploy
+          .sourceDeployNow(badRholang)
+          .withDeployer(ByteString.copyFrom(genesisPk.bytes))
+          .withPhloPrice(1L)
+          .withPhloLimit(200L)
+      )
+
+    val genesisTerms =
+      Seq(
+        StandardDeploys.listOps,
+        StandardDeploys.either,
+        StandardDeploys.nonNegativeNumber,
+        StandardDeploys.makeMint,
+        StandardDeploys.PoS,
+        StandardDeploys.authKey,
+        StandardDeploys.revVault,
+        StandardDeploys.revGenerator(genesisPk, Seq.empty, 1000L),
+        StandardDeploys
+          .poSGenerator(genesisPk, ProofOfStake(0L, Long.MaxValue, Seq(Validator(genesisPk, 0L))))
       )
 
     runtimeManager
@@ -212,7 +272,7 @@ class RuntimeManagerTest extends FlatSpec with Matchers {
           t,
           System.currentTimeMillis(),
           accounting.MAX_VALUE
-        )
+      )
     )
     val (_, firstDeploy) =
       runtimeManager

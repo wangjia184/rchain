@@ -18,7 +18,7 @@ final case class Vault(revAddress: RevAddress, initialBalance: Long) extends Com
        |       "findOrCreate",
        |       "${revAddress.toBase58}",
        |       Nil
-       |     ) | stdout!("Vault.FindOrCreate")
+       |     ) | stdout!("started-Rev-instantiateUserVault")
        |   }
        | }
      """.stripMargin

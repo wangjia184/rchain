@@ -158,8 +158,8 @@ new PoS, rs(`rho:registry:insertSigned:ed25519`), uriOut in {
                   | getParameters!(*parametersCh)
                   | for (@depositResult <- depositRet; @codeHash, @phloRate, @userPk, @timestamp <- parametersCh; lastPayment <- paymentStore) {
                     match depositResult {
-                      (true, Nil) => { paymentStore!([codeHash, userPk, timestamp, phloRate * amount]) | return!(phloRate *amount) }
-                      (false, err) => { paymentStore!([codeHash, userPk, timestamp, 0]) | return!(0) }
+                      (true, Nil) => { paymentStore!([codeHash, userPk, timestamp, amount]) | return!(true) | stdout!("finished-PoS.pay-success") }
+                      (false, err) => { paymentStore!([codeHash, userPk, timestamp, 0]) | return!(err) | stdout!("finished-PoS.pay-failure") }
                     }
                   }
                 }

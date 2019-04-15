@@ -34,10 +34,10 @@ final case class ProofOfStake(minimumBond: Long, maximumBond: Long, validators: 
 
   val code: String =
     s"""
-       | new rl(`rho:registry:lookup`), PoSCh in {
+       | new rl(`rho:registry:lookup`), PoSCh, stdout(`rho:io:stdout`) in {
        |   rl!(`rho:id:cnec3pa8prp4out3yc8facon6grm3xbsotpd4ckjfx8ghuw77xadzt`, *PoSCh)
        |   | for (@(_, PoS) <- PoSCh) {
-       |     @PoS!($minimumBond, $maximumBond)
+       |     @PoS!($minimumBond, $maximumBond) | stdout!("started-PoS-instantiate")
        |   }
        | }
      """.stripMargin

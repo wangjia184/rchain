@@ -6,6 +6,7 @@ import cats.effect.concurrent.MVar
 import cats.effect.{Sync, _}
 import cats.implicits._
 import com.google.protobuf.ByteString
+import coop.rchain.casper.ConstructDeploy
 import coop.rchain.casper.protocol._
 import coop.rchain.casper.util.ProtoUtil
 import coop.rchain.casper.util.rholang.RuntimeManager.StateHash
@@ -13,7 +14,7 @@ import coop.rchain.catscontrib.Catscontrib._
 import coop.rchain.catscontrib.MonadTrans
 import coop.rchain.crypto.codec.Base16
 import coop.rchain.crypto.hash.Blake2b512Random
-import coop.rchain.models.Expr.ExprInstance.{GBool, GString}
+import coop.rchain.models.Expr.ExprInstance.GString
 import coop.rchain.models._
 import coop.rchain.rholang.interpreter.accounting._
 import coop.rchain.rholang.interpreter.errors.BugFoundError
@@ -25,7 +26,6 @@ import coop.rchain.rholang.interpreter.{
   Interpreter,
   RhoType,
   Runtime,
-  accounting,
   PrettyPrinter => RholangPrinter
 }
 import coop.rchain.rspace.{Blake2b256Hash, ReplayException}
@@ -49,9 +49,10 @@ trait RuntimeManager[F[_]] {
       terms: Seq[DeployData],
       time: Option[Long] = None
   ): F[(StateHash, Seq[InternalProcessedDeploy])]
-  def sequenceEffects(start: StateHash)(terms: Seq[DeployData]): F[(StateHash, EvaluateResult)]
   def storageRepr(hash: StateHash): F[Option[String]]
+  def sequenceEffects(start: StateHash)(deploys: Seq[DeployData]): F[(StateHash, EvaluateResult)]
   def computeBonds(hash: StateHash): F[Seq[Bond]]
+  def computeBalance(start: StateHash)(user: ByteString): F[Long]
   def getData(hash: StateHash, channel: Par): F[Seq[Par]]
   def getContinuation(
       hash: StateHash,
@@ -75,14 +76,10 @@ class RuntimeManagerImpl[F[_]: Concurrent] private[rholang] (
   def captureResults(start: StateHash, deploy: DeployData, name: Par): F[Seq[Par]] =
     Sync[F].bracket(runtimeContainer.take) { runtime =>
       for {
-        _                                        <- Sync[F].delay(println("Before: CaptureResults.RSpaceReset"))
         _                                        <- runtime.space.reset(Blake2b256Hash.fromByteArray(start.toByteArray))
-        _                                        <- Sync[F].delay(println("Before: CaptureResults.RSpaceReset"))
         (codeHash, phloPrice, userId, timestamp) = ProtoUtil.getRholangDeployParams(deploy)
         _                                        <- runtime.shortLeashParams.setParams(codeHash, phloPrice, userId, timestamp)
-        _                                        <- Sync[F].delay(println("Before doInj"))
         evaluateResult                           <- doInj(deploy, runtime.reducer, runtime.errorLog)(runtime.cost)
-        _                                        <- Sync[F].delay(println("After doInj"))
         values                                   <- runtime.space.getData(name).map(_.flatMap(_.a.pars))
         result                                   = if (evaluateResult.errors.nonEmpty) Seq.empty[Par] else values
       } yield result
@@ -112,17 +109,6 @@ class RuntimeManagerImpl[F[_]: Concurrent] private[rholang] (
       } yield result
     }(runtimeContainer.put)
 
-  private def setTimestamp(
-      time: Option[Long],
-      runtime: Runtime[F]
-  ): F[Unit] =
-    time match {
-      case Some(t) =>
-        val timestamp: Par = Par(exprs = Seq(Expr(Expr.ExprInstance.GInt(t))))
-        runtime.blockTime.setParams(timestamp)
-      case None => ().pure[F]
-    }
-
   def storageRepr(hash: StateHash): F[Option[String]] =
     Sync[F]
       .bracket(runtimeContainer.take) { runtime =>
@@ -145,51 +131,137 @@ class RuntimeManagerImpl[F[_]: Concurrent] private[rholang] (
         |  }
         |}""".stripMargin
 
-    val bondsQueryTerm = sourceDeploy(bondsQuery, 0L, accounting.MAX_VALUE)
-    captureResults(hash, bondsQueryTerm)
-      .ensureOr(
-        bondsPar =>
-          new IllegalArgumentException(
-            s"Incorrect number of results from query of current bonds: ${bondsPar.size}"
-          )
-      )(bondsPar => bondsPar.size == 1)
-      .map { bondsPar =>
-        toBondSeq(bondsPar.head)
-      }
+    val bondsQueryTerm = ConstructDeploy.sourceDeployNow(bondsQuery)
+    withResetRuntime(hash) { runtime =>
+      computeEffect(hash)(bondsQueryTerm) *> getResult(runtime)()
+        .ensureOr(
+          bondsPar =>
+            new IllegalArgumentException(
+              s"Incorrect number of results from query of current bonds: ${bondsPar.size}"
+            )
+        )(bondsPar => bondsPar.size == 1)
+        .map { bondsPar =>
+          toBondSeq(bondsPar.head)
+        }
+    }
   }
 
   def sequenceEffects(start: StateHash)(deploys: Seq[DeployData]): F[(StateHash, EvaluateResult)] =
     withRuntime(
       runtime =>
         deploys.toList
-          .foldM(
-            (Blake2b256Hash.fromByteArray(start.toByteArray), EvaluateResult(Cost(0), Vector.empty))
-          )(foldEffect(runtime))
-          .map(_.leftMap(finish => ByteString.copyFrom(finish.bytes.toArray)))
+          .foldM(EvaluateResult(Cost(0), Vector.empty)) {
+            case (EvaluateResult(cost0, errors0), deployData) =>
+              computeEffect(runtime)(deployData).map {
+                case EvaluateResult(cost1, errors1) =>
+                  EvaluateResult(cost0 + cost1, errors0 |+| errors1)
+              }
+          }
+          .product(
+            runtime.space
+              .createCheckpoint()
+              .map(finish => ByteString.copyFrom(finish.root.bytes.toArray))
+          )
+          .map(_.swap)
     )
 
-  private def foldEffect(
-      runtime: Runtime[F]
-  ): ((Blake2b256Hash, EvaluateResult), DeployData) => F[(Blake2b256Hash, EvaluateResult)] = {
-    case ((start, EvaluateResult(cost0, errors0)), deploy) =>
-      for {
-        _                                        <- Sync[F].delay(println("started-foldEffect"))
-        _                                        <- runtime.space.reset(start)
-        (codeHash, phloPrice, userId, timestamp) = ProtoUtil.getRholangDeployParams(deploy)
-        _                                        <- runtime.shortLeashParams.setParams(codeHash, phloPrice, userId, timestamp)
-        evaluateResult                           <- doInj(deploy, runtime.reducer, runtime.errorLog)(runtime.cost)
-        EvaluateResult(cost1, errors1)           = evaluateResult
-        finish <- if (errors1.isEmpty) runtime.space.createCheckpoint().map(_.root)
-                 else start.pure[F]
-      } yield (finish, EvaluateResult(cost0 + cost1, errors0 |+| errors1))
-  }
+  def computeEffect(start: StateHash)(deploy: DeployData): F[EvaluateResult] =
+    withResetRuntime(start)(computeEffect(_)(deploy))
 
-  private def withResetRuntime[A](start: StateHash)(f: Runtime[F] => F[A]): F[A] =
+  private[this] def computeEffect(runtime: Runtime[F])(deploy: DeployData): F[EvaluateResult] =
+    for {
+      runtimeParameters                        <- ProtoUtil.getRholangDeployParams(deploy).pure[F]
+      (codeHash, phloPrice, userId, timestamp) = runtimeParameters
+      _                                        <- runtime.shortLeashParams.setParams(codeHash, phloPrice, userId, timestamp)
+      evaluateResult                           <- doInj(deploy, runtime.reducer, runtime.errorLog)(runtime.cost)
+    } yield evaluateResult
+
+  /** TODO: Investigate the requirements for handling errors thrown in the payment and balance query deploys. That is
+    *errors existing in the "errors" component of the evaluation result returned by computeEffect. */
+  private[this] def balanceQuerySource(user: ByteString): String =
+    s"""
+       | new stdout(`rho:io:stdout`), revAddressOps(`rho:rev:address`) in { new rl(`rho:registry:lookup`), revAddressOps(`rho:rev:address`), revVaultCh in {
+       |   rl!(`rho:id:1o93uitkrjfubh43jt19owanuezhntag5wh74c6ur5feuotpi73q8z`, *revVaultCh) | stdout!("started-balanceQuery-findRevVaultInstance")
+       |   | for (@(_, RevVault) <- revVaultCh) {
+       |     stdout!("finished-balanceQuery-findRevVaultInstance") | new vaultCh, revAddressCh in {
+       |        revAddressOps!("fromPublicKey", "${Base16.encode(user.toByteArray)}".hexToBytes(), *revAddressCh)
+       |       | for(@revAddress <- revAddressCh) {
+       |       @RevVault!("findOrCreate", revAddress, *vaultCh) | stdout!("started-balanceQuery-findUserRevVault")
+       |       | for(@vaultEither <- vaultCh){
+       |         match vaultEither {
+       |           (true, vault) => {
+       |             @vault!("balance", "__SCALA__") | stdout!("finished-balanceQuery-findUserRevVault-success")
+       |           }
+       |           (false, error) => {
+       |             @"__SCALA__"!(error) | stdout!(error) | stdout!("finished-balanceQuery-findUserRevVault-failure")
+       |           }
+       |         }
+       |       }
+       |       }
+       |     }
+       |   }
+       | }}
+     """.stripMargin
+
+  def computeBalance(start: StateHash)(user: ByteString): F[Long] =
+    withRuntime(computeBalance(_)(user))
+
+  private[this] def computeBalance(runtime: Runtime[F])(user: ByteString): F[Long] =
+    Sync[F].delay(println("started-balanceQuery")) *> computeEffect(runtime)(
+      ConstructDeploy.sourceDeployNow(balanceQuerySource(user))
+    ) *> {
+      getResult(runtime)() >>= {
+        case Seq(RhoType.Number(balance)) =>
+          Sync[F].delay(println(s"finished-computeUserBalance-success: balance = $balance")) *>
+            balance.pure[F]
+        case errors =>
+          Sync[F].delay(
+            println(
+              s"finished-computeUserBalance-failure: errors = ${errors.map(RholangPrinter().buildString)}"
+            )
+          ) *>
+            BugFoundError(
+              s"Balance query failed unexpectedly: ${errors.map(RholangPrinter().buildString)}"
+            ).raiseError[F, Long]
+      }
+    }
+
+  private[this] def deployPaymentSource(amount: Long): String =
+    s"""
+       | new rl(`rho:registry:lookup`), poSCh, stdout(`rho:io:stdout`) in {
+       |   rl!(`rho:id:cnec3pa8prp4out3yc8facon6grm3xbsotpd4ckjfx8ghuw77xadzt`, *poSCh) |
+       |   for(@(_, PoS) <- poSCh) {
+       |     @PoS!("pay", $amount, "__SCALA__")
+       |   }
+       | }
+       """.stripMargin
+
+  private[this] def computeDeployPayment(
+      runtime: Runtime[F]
+  )(user: ByteString, amount: Long): F[Unit] =
+    Sync[F].delay(println(s"started-payForDeploy: amount = $amount")) *> computeEffect(runtime)(
+      ConstructDeploy.sourceDeployNow(deployPaymentSource(amount)).withDeployer(user)
+    ) *> {
+      getResult(runtime)() >>= {
+        case Seq(RhoType.Boolean(true)) =>
+          Sync[F].delay(println(s"finished-payForDeploy-success")) *> ().pure[F]
+        case Seq(RhoType.String(error)) =>
+          Sync[F].delay(println(s"finished-payForDeploy-failed: error = $error")) *> BugFoundError(
+            s"Deploy payment failed unexpectedly"
+          ).raiseError[F, Unit]
+        case other =>
+          Sync[F].delay(println("finished-payForDeploy-failed: unknown error")) *> BugFoundError(
+            s"Deploy payment returned unexpected result: ${other.map(RholangPrinter().buildString)}"
+          ).raiseError[F, Unit]
+      }
+    }
+
+  private[this] def withResetRuntime[A](start: StateHash)(f: Runtime[F] => F[A]): F[A] =
     withRuntime(
       runtime => runtime.space.reset(Blake2b256Hash.fromByteArray(start.toByteArray)) *> f(runtime)
     )
 
-  private def withRuntime[A](f: Runtime[F] => F[A]): F[A] =
+  private[this] def withRuntime[A](f: Runtime[F] => F[A]): F[A] =
     Sync[F].bracket(runtimeContainer.take)(f)(runtimeContainer.put)
 
   private def toBondSeq(bondsMap: Par): Seq[Bond] =
@@ -202,16 +274,16 @@ class RuntimeManagerImpl[F[_]: Concurrent] private[rholang] (
         Bond(validatorName, stakeAmount)
     }.toList
 
-  private def sourceDeploy(source: String, timestamp: Long, phlos: Long): DeployData =
-    DeployData(
-      deployer = ByteString.EMPTY,
-      timestamp = timestamp,
-      term = source,
-      phloLimit = phlos
-    )
+  // TODO: Curry signature (start)(name).
+  def getData(start: StateHash, name: Par): F[Seq[Par]] =
+    withResetRuntime(start)(getData(_)(name))
 
-  def getData(hash: StateHash, channel: Par): F[Seq[Par]] =
-    withResetRuntime(hash)(_.space.getData(channel).map(_.flatMap(_.a.pars)))
+  private[this] def getData(runtime: Runtime[F])(name: Par): F[Seq[Par]] =
+    runtime.space.getData(name).map(_.flatMap(_.a.pars))
+
+  private[this] def getResult(runtime: Runtime[F])(name: String = "__SCALA__"): F[Seq[Par]] =
+    getData(runtime)(Par().withExprs(Seq(Expr(GString(name))))) <*
+      computeEffect(runtime)(ConstructDeploy.sourceDeployNow(s"""for(_<-@"$name"){ Nil }"""))
 
   def getContinuation(
       hash: StateHash,
@@ -233,171 +305,51 @@ class RuntimeManagerImpl[F[_]: Concurrent] private[rholang] (
       start: StateHash,
       deploys: Seq[DeployData],
       runtime: Runtime[F]
-  ): F[(StateHash, Seq[InternalProcessedDeploy])] = {
-
-    def computeUserBalance(start: Blake2b256Hash, user: ByteString): F[Long] = {
-
-      val balanceQuerySource: String =
-        s"""
-           | new stdout(`rho:io:stdout`), revAddressOps(`rho:rev:address`) in { stdout!("BalanceQuery") | new rl(`rho:registry:lookup`), revAddressOps(`rho:rev:address`), revVaultCh in {
-           |   rl!(`rho:id:1o93uitkrjfubh43jt19owanuezhntag5wh74c6ur5feuotpi73q8z`, *revVaultCh) | stdout!("BalanceQuery.RevVaultInstanceQuery")
-           |   | for (@(_, RevVault) <- revVaultCh) {
-           |     stdout!("BalanceQuery.RevVaultInstanceFound") | new vaultCh, revAddressCh in {
-           |        revAddressOps!("fromPublicKey", "${Base16.encode(user.toByteArray)}".hexToBytes(), *revAddressCh)
-           |       | for(@revAddress <- revAddressCh) {
-           |       @RevVault!("findOrCreate", revAddress, *vaultCh) | stdout!("BalanceQuery.UserRevVaultQuery")
-           |       | for(@vaultEither <- vaultCh){
-           |         stdout!("BalanceQuery.UserRevVaultEitherFound") | match vaultEither {
-           |           (true, vault) => {
-           |             @vault!("balance", "__SCALA__") | stdout!("BalanceQuery.UserRevVaultFound")
-           |           }
-           |           (false, error) => {
-           |             @"__SCALA__"!(error) | stdout!(error)
-           |           }
-           |         }
-           |       }
-           |       }
-           |     }
-           |   }
-           | }}
-     """.stripMargin
-
-      Sync[F].delay(println("started-computeUserBalance")) *>
-        foldEffect(runtime)(
-          (start, EvaluateResult(Cost(0), Vector.empty)),
-          DeployData(
-            deployer = user,
-            term = balanceQuerySource,
-            phloLimit = Long.MaxValue,
-            timestamp = System.currentTimeMillis()
-          )
-        ).flatMap { _ =>
-          runtime.space
-            .getData(Par().withExprs(Seq(Expr(GString("__SCALA__")))))
-            .map(_.flatMap(_.a.pars)) >>= {
-            case Seq(RhoType.Number(balance)) =>
-              Sync[F].delay(println(s"finished-computeUserBalance: $balance")) *> balance.pure[F]
-            case errors =>
-              Sync[F].delay(
-                println(
-                  s"finished-computeUserBalance: ${errors.map(RholangPrinter().buildString)}"
-                )
-              ) *>
-                BugFoundError(
-                  s"Balance query failed unexpectedly: ${errors.map(RholangPrinter().buildString)}"
-                ).raiseError[F, Long]
-          }
-        }
-    }
-
-    /**
-      * FIXME: Since "__SCALA__" is a public name, the result of this code can be
-      *        intercepted and/or forged. Require a more general method to return
-      *        results to an unforgeable name known only by the runtime manager.
-      *        Or, perhaps clear the "__SCALA__" channel after each evaluation.
-      *
-      * @note This function assumes that PoS.pay always halts. This justifies the maximum
-      *       value phlo limit. It also assumes that all deploys are valid at this stage
-      *       of execution, such that PoS.pay should always succeed.
-      *
-      */
-    def payForDeploy(
-        start: Blake2b256Hash,
-        user: ByteString,
-        phloPrice: Long,
-        phloLimit: Long
-    ): F[Unit] = {
-
-      val payDeploySource: String =
-        s"""
-           | new rl(`rho:registry:lookup`), poSCh, stdout(`rho:io:stdout`) in {
-           |   rl!(`rho:id:cnec3pa8prp4out3yc8facon6grm3xbsotpd4ckjfx8ghuw77xadzt`, *poSCh) |
-           |   for(@(_, PoS) <- poSCh) {
-           |     @PoS!("pay", ${phloPrice * phloLimit}, "__SCALA__") | stdout!("started-PoS.pay")
-           |   }
-           | }
-       """.stripMargin
-
-      Sync[F].delay(println("started-payForDeploy")) *>
-        foldEffect(runtime)(
-          (start, EvaluateResult(Cost(0), Vector.empty)),
-          DeployData(
-            deployer = user,
-            term = payDeploySource,
-            phloLimit = Long.MaxValue,
-            timestamp = System.currentTimeMillis()
-          )
-        ) >>= {
-        case (finish, EvaluateResult(cost, errors)) =>
-          Sync[F].delay(println(s"payForDeployCost: $cost")) *> Sync[F].delay(
-            println(s"payForDeployErrors: $errors")
-          ) *>
-            runtime.space
-              .getData(Par().withExprs(Seq(Expr(GString("__SCALA__")))))
-              .map(_.flatMap(_.a.pars)) >>= {
-            case Seq(RhoType.Number(amount)) if amount == (phloPrice * phloLimit) =>
-              Sync[F].delay(println("finished-payForDeploy: success")) *> ().pure[F]
-            case Seq(RhoType.Number(amount)) if amount == 0 =>
-              Sync[F].delay(println("finished-payForDeploy: failed")) *> BugFoundError(
-                s"Deploy payment failed unexpectedly"
-              ).raiseError[F, Unit]
-            case errors =>
-              Sync[F].delay(println("finished-payForDeploy: failed")) *> BugFoundError(
-                s"Deploy payment returned unexpected result: ${errors.map(RholangPrinter().buildString)}"
-              ).raiseError[F, Unit]
-          }
-
-      }
-    }
-
+  ): F[(StateHash, Seq[InternalProcessedDeploy])] =
     Concurrent[F]
       .defer {
-        deploys.toList.foldM(
+        deploys.toList.foldLeftM(
           (Blake2b256Hash.fromByteArray(start.toByteArray), Seq.empty[InternalProcessedDeploy])
         ) {
-          case ((prev, processedDeploys), deployData) =>
-            import deployData._
-            runtime.space.reset(prev) *>
-              computeUserBalance(prev, deployer) >>= { balance =>
-              runtime.space.reset(prev) *> {
+          case ((prev, processedDeploys), deploy) =>
+            import deploy._
+            runtime.space.reset(prev) *> {
+              computeBalance(runtime)(deployer) >>= { balance =>
                 if (balance >= phloLimit * phloPrice) {
-                  for {
-                    executionParameters                      <- ProtoUtil.getRholangDeployParams(deployData).pure[F]
-                    (codeHash, phloPrice, userId, timestamp) = executionParameters
-                    _ <- runtime.shortLeashParams.setParams(
-                          codeHash,
-                          phloPrice,
-                          userId,
-                          timestamp
+                  Sync[F].delay(println("started-evaluate-deployment")) *> computeEffect(runtime)(
+                    deploy
+                  ) >>= {
+                    case EvaluateResult(cost, errors) =>
+                      Sync[F].delay(
+                        println(
+                          s"finished-evaluate-deployment: cost = ${cost.value}, errors = ${errors.mkString(", ")}"
                         )
-                    evaluateResult <- doInj(deployData, runtime.reducer, runtime.errorLog)(
-                                       runtime.cost
-                                     )
-                    EvaluateResult(cost, errors) = evaluateResult
-                    _ <- if (errors.nonEmpty)
-                          runtime.space.reset(prev) *>
-                            payForDeploy(prev, deployer, 0L, Long.MaxValue)
-                        else
-                          runtime.space.createCheckpoint() >>= { checkpoint0 =>
-                            payForDeploy(checkpoint0.root, deployer, 0L, Long.MaxValue)
+                      ) *>
+                        errors.nonEmpty
+                          .pure[F]
+                          .ifM(ifTrue = runtime.space.reset(prev), ifFalse = ().pure[F]) *> {
+                        computeDeployPayment(runtime)(deployer, cost.value * phloPrice) *> {
+                          runtime.space.createCheckpoint().map { checkpoint =>
+                            (
+                              checkpoint.root,
+                              processedDeploys :+ InternalProcessedDeploy(
+                                deploy,
+                                Cost.toProto(cost),
+                                checkpoint.log,
+                                DeployStatus.fromErrors(errors)
+                              )
+                            )
                           }
-                    checkpoint1 <- runtime.space.createCheckpoint()
-                    result = (
-                      checkpoint1.root,
-                      processedDeploys :+
-                        InternalProcessedDeploy(
-                          deployData,
-                          Cost.toProto(cost),
-                          checkpoint1.log,
-                          DeployStatus.fromErrors(errors)
-                        )
-                    )
-                  } yield result
+                        }
+                      }
+                  }
                 } else {
-                  (
+                  Sync[F].delay(
+                    println("finished-evaluate-deployment: aborted due to insufficient phlo")
+                  ) *> (
                     prev,
                     processedDeploys :+ InternalProcessedDeploy(
-                      deployData,
+                      deploy,
                       Cost.toProto(Cost(0)),
                       Seq.empty,
                       UserErrors(
@@ -415,8 +367,8 @@ class RuntimeManagerImpl[F[_]: Concurrent] private[rholang] (
         }
       }
       .map(_.leftMap(finish => ByteString.copyFrom(finish.bytes.toArray)))
-  }
 
+  // Replay: If status == OOPE, then balance is invalid. Re-verify user balance.
   private def replayEval(
       terms: Seq[InternalProcessedDeploy],
       runtime: Runtime[F],
@@ -429,10 +381,9 @@ class RuntimeManagerImpl[F[_]: Concurrent] private[rholang] (
     ): F[Either[(Option[DeployData], Failed), StateHash]] =
       Concurrent[F].defer {
         terms match {
+
           case InternalProcessedDeploy(deploy, _, log, status) +: rem =>
-            val (codeHash, phloPrice, userId, timestamp) = ProtoUtil.getRholangDeployParams(
-              deploy
-            )
+            val (codeHash, phloPrice, userId, timestamp) = ProtoUtil.getRholangDeployParams(deploy)
             for {
               _         <- runtime.shortLeashParams.setParams(codeHash, phloPrice, userId, timestamp)
               _         <- runtime.replaySpace.rig(hash, log.toList)
@@ -489,13 +440,21 @@ class RuntimeManagerImpl[F[_]: Concurrent] private[rholang] (
     implicit val rand: Blake2b512Random = Blake2b512Random(
       DeployData.toByteArray(ProtoUtil.stripDeployData(deploy))
     )
-    Sync[F].delay(println("started-doInj")) *> Interpreter[F].injAttempt(
+    Interpreter[F].injAttempt(
       reducer,
       errorLog,
       deploy.term,
       Cost(deploy.phloLimit)
-    ) <* Sync[F].delay(println("finished-doInj"))
+    )
   }
+
+  private[this] def setTimestamp(time: Option[Long], runtime: Runtime[F]): F[Unit] =
+    time match {
+      case Some(t) =>
+        val timestamp: Par = Par(exprs = Seq(Expr(Expr.ExprInstance.GInt(t))))
+        runtime.blockTime.setParams(timestamp)
+      case None => ().pure[F]
+    }
 
 }
 
@@ -572,7 +531,8 @@ object RuntimeManager {
         runtimeManager.getContinuation(hash, channels).liftM[T]
 
       override val emptyStateHash: StateHash = runtimeManager.emptyStateHash
-
+      override def computeBalance(start: StateHash)(user: StateHash): T[F, Long] =
+        runtimeManager.computeBalance(start)(user).liftM[T]
     }
 
   def eitherTRuntimeManager[E, F[_]: Monad](

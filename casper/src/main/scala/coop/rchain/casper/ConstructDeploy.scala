@@ -1,5 +1,6 @@
 package coop.rchain.casper
 import cats.Monad
+import cats.implicits._
 import com.google.protobuf.ByteString
 import coop.rchain.casper.protocol.{DeployData, ProcessedDeploy}
 import coop.rchain.crypto.PrivateKey
