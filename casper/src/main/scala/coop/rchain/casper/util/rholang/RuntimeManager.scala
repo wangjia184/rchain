@@ -133,7 +133,7 @@ class RuntimeManagerImpl[F[_]: Concurrent] private[rholang] (
 
     val bondsQueryTerm = ConstructDeploy.sourceDeployNow(bondsQuery)
     withResetRuntime(hash) { runtime =>
-      computeEffect(hash)(bondsQueryTerm) *> getResult(runtime)()
+      computeEffect(runtime)(bondsQueryTerm) *> getResult(runtime)()
         .ensureOr(
           bondsPar =>
             new IllegalArgumentException(

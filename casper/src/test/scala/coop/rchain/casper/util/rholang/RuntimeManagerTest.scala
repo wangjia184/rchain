@@ -76,7 +76,7 @@ class RuntimeManagerTest extends FlatSpec with Matchers {
           case (start, EvaluateResult(_, errors0)) =>
             errors0.isEmpty should be(true)
             mgr.computeState(start, Seq(deploy)).flatMap {
-              case (finish, Seq(InternalProcessedDeploy(_, cost, log, status))) =>
+              case (finish, Seq(InternalProcessedDeploy(_, cost, _, _))) =>
                 mgr.computeBalance(finish)(ByteString.copyFrom(userPk.bytes)).map { balance =>
                   balance should be(33 - (deploy.phloPrice * cost.cost))
                 }
@@ -272,7 +272,7 @@ class RuntimeManagerTest extends FlatSpec with Matchers {
           t,
           System.currentTimeMillis(),
           accounting.MAX_VALUE
-      )
+        )
     )
     val (_, firstDeploy) =
       runtimeManager
