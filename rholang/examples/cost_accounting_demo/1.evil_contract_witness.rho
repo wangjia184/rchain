@@ -1,0 +1,15 @@
+
+// The continuation at @"z" should never fire.
+
+new stdout(`rho:io:stdout`), log in {
+
+  log!(("1.evil_contract_witness.rho"))
+
+  | for (_ <- @"z") {
+    log!(("effect witnessed"))
+  }
+
+  | contract log (@data) = {
+    @"DEMO"!(data) | stdout!(data)
+  }
+}

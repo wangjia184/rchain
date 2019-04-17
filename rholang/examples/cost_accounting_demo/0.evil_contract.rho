@@ -1,0 +1,18 @@
+
+// To test that both payment and state reversion occurs when a contract throws an error,
+// this contract must both affect the store and throw an error.
+
+new stdout(`rho:io:stdout`) in {
+
+  log!(("0.evil_contract.rho"))
+
+  | @"x"!(1) | @"y"!("foo") | @"z"!("bar")
+
+  | for (@x <- @"x"; @y <- @"y") {
+    @"xy"!(x + y)
+  }
+
+  | contract log (@data) = {
+    @"DEMO"!(data) | stdout!(data)
+  }
+}
