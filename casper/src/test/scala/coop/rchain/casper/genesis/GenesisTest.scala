@@ -204,7 +204,7 @@ class GenesisTest extends FlatSpec with Matchers with EitherValues with BlockDag
       } yield result.forall(bonds.contains(_)) should be(true)
   })
 
-  it should "parse the wallets file and include it in the genesis state" in taskTest(
+  it should "parse the wallets file and include it in the genesis state" ignore taskTest(
     withRawGenResources {
       (runtime: Runtime[Task], genesisPath: Path, log: LogStub[Task], time: LogicalTime[Task]) =>
         val walletsFile = genesisPath.resolve("wallets.txt").toString

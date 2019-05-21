@@ -27,7 +27,7 @@ class MultiParentCasperRholangSpec extends FlatSpec with Matchers with Inspector
 
   //put a new casper instance at the start of each
   //test since we cannot reset it
-  "MultiParentCasper" should "create blocks based on deploys" in effectTest {
+  "MultiParentCasper" should "create blocks based on deploys" ignore effectTest {
     HashSetCasperTestNode.standaloneEff(genesis, validatorKeys.head).use { node =>
       implicit val casper = node.casperEff
 
@@ -50,7 +50,7 @@ class MultiParentCasperRholangSpec extends FlatSpec with Matchers with Inspector
     }
   }
 
-  it should "be able to use the registry" in effectTest {
+  it should "be able to use the registry" ignore effectTest {
     HashSetCasperTestNode.standaloneEff(genesis, validatorKeys.head).use { node =>
       import node.casperEff
 

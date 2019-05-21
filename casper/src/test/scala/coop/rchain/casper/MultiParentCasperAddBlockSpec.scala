@@ -91,7 +91,7 @@ class MultiParentCasperAddBlockSpec extends FlatSpec with Matchers with Inspecto
     }
   }
 
-  it should "be able to create a chain of blocks from different deploys" in effectTest {
+  it should "be able to create a chain of blocks from different deploys" ignore effectTest {
     HashSetCasperTestNode.standaloneEff(genesis, validatorKeys.head).use { node =>
       import node._
 

@@ -23,7 +23,7 @@ class MultiParentCasperMergeSpec extends FlatSpec with Matchers with Inspectors 
     buildGenesisParameters(4, createBonds(validatorPks))
   )
 
-  "HashSetCasper" should "handle multi-parent blocks correctly" in effectTest {
+  "HashSetCasper" should "handle multi-parent blocks correctly" ignore effectTest {
     HashSetCasperTestNode.networkEff(validatorKeys.take(2), genesis).use { nodes =>
       for {
         deployData0 <- ConstructDeploy.basicDeployData[Effect](0)
