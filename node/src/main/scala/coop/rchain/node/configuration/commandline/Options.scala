@@ -308,11 +308,6 @@ final case class Options(arguments: Seq[String]) extends ScallopConf(arguments) 
       descr = "Path to the base16 encoded private key to use for signing a proposed blocks."
     )
 
-    val validatorSigAlgorithm = opt[String](
-      descr = "Name of the algorithm to use for signing proposed blocks. " +
-        "Currently supported values: ed25519"
-    )
-
     val shardId = opt[String](
       descr = "Identifier of the shard this node is connected to."
     )
@@ -357,7 +352,8 @@ final case class Options(arguments: Seq[String]) extends ScallopConf(arguments) 
       "Starts a thin client that will evaluate rholang in file on a existing running node. See grpcHost and grpcPort."
     )
 
-    val fileNames = trailArg[List[String]](required = true)(stringListConverter)
+    val fileNames               = trailArg[List[String]](required = true)(stringListConverter)
+    val printUnmatchedSendsOnly = opt[Boolean](required = false)
   }
   addSubcommand(eval)
 
@@ -511,6 +507,8 @@ final case class Options(arguments: Seq[String]) extends ScallopConf(arguments) 
     descr(
       "Force Casper (on an existing running node) to propose a block based on its accumulated deploys."
     )
+
+    val printUnmatchedSends = opt[Boolean](required = false)
   }
   addSubcommand(propose)
 

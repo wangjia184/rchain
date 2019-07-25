@@ -317,8 +317,12 @@ lazy val node = (project in file("node"))
         Cmd("WORKDIR", (defaultLinuxInstallLocation in Docker).value),
         Cmd("ADD", s"--chown=$daemon:$daemon opt /opt"),
         Cmd("USER", "root"),
-        ExecCmd("ENTRYPOINT", "bin/rnode", "--profile=docker",
-          "-XX:ErrorFile=/var/lib/rnode/hs_err_pid%p.log"),
+        ExecCmd(
+          "ENTRYPOINT",
+          "bin/rnode",
+          "--profile=docker",
+          "-XX:ErrorFile=/var/lib/rnode/hs_err_pid%p.log"
+        ),
         ExecCmd("CMD", "run")
       )
     },
@@ -413,7 +417,11 @@ lazy val rholang = (project in file("rholang"))
 lazy val rholangCLI = (project in file("rholang-cli"))
   .settings(commonSettings: _*)
   .settings(
-    mainClass in assembly := Some("coop.rchain.rholang.interpreter.RholangCLI")
+    mainClass in assembly := Some("coop.rchain.rholang.interpreter.RholangCLI"),
+    assemblyMergeStrategy in assembly := {
+      case path if path.endsWith("module-info.class") => MergeStrategy.discard
+      case path                                       => MergeStrategy.defaultMergeStrategy(path)
+    }
   )
   .dependsOn(rholang)
 

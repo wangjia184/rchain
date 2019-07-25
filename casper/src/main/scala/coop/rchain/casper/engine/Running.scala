@@ -32,11 +32,6 @@ import coop.rchain.models.BlockHash.BlockHash
 import scala.concurrent.duration._
 import scala.util.Try
 
-/** Node in this state has already received at least one [[ApprovedBlock]] and it has created an instance
-  * of [[MultiParentCasper]].
-  *
-  * In the future it will be possible to create checkpoint with new [[ApprovedBlock]].
-  **/
 object Running {
 
   val timeout: FiniteDuration = 240 seconds
@@ -116,6 +111,18 @@ object Running {
     })
   }
 
+  def addNewEntry[F[_]: Monad: Log: Running.RequestedBlocks: Time](
+      hash: BlockHash,
+      peer: Option[PeerNode] = None
+  ): F[Unit] =
+    Log[F].info(s"Creating new entry for the ${PrettyPrinter.buildString(hash)} request") >> Time[F].currentMillis >>= (
+        ts => {
+          RequestedBlocks[F].modify(
+            _ + (hash -> Requested(timestamp = ts, peers = peer.toSet))
+          )
+        }
+    )
+
   def handleHasBlock[F[_]: Monad: RPConfAsk: RequestedBlocks: TransportLayer: Time: Log](
       peer: PeerNode,
       hb: HasBlock
@@ -125,26 +132,24 @@ object Running {
 
     val hashStr = PrettyPrinter.buildString(hb.hash)
 
-    def addNewEntry =
-      Log[F].info(s"Creating new entry for the $hashStr request") >> Time[F].currentMillis >>= (
-          ts => {
-            RequestedBlocks[F].modify(
-              _ + (hb.hash -> Requested(timestamp = ts, peers = Set(peer)))
-            )
-          }
-      )
-
     def addToWaitingList(requested: Requested): F[Unit] =
       Log[F].info(s"Adding $peer to waiting list of $hashStr request") >> RequestedBlocks[F]
         .modify { requestedBlocks =>
-          requestedBlocks + (hb.hash -> requested.copy(waitingList = peer :: requested.waitingList))
+          requestedBlocks + (hb.hash -> requested.copy(
+            waitingList = requested.waitingList ++ List(peer)
+          ))
         }
 
     val logIntro = s"Received confirmation from $peer that it has block $hashStr."
     Log[F].info(logIntro) >> casperContains(hb.hash).ifM(
       noop[F],
       RequestedBlocks[F].read >>= (_.get(hb.hash)
-        .fold(requestForBlock[F](peer, hb.hash) >> addNewEntry)(addToWaitingList))
+        .fold(requestForBlock[F](peer, hb.hash) >> addNewEntry[F](hb.hash, Some(peer)))(
+          req =>
+            if (req.peers.isEmpty)
+              requestForBlock[F](peer, hb.hash) >> addNewEntry[F](hb.hash, Some(peer))
+            else addToWaitingList(req)
+        ))
     )
   }
 
@@ -174,52 +179,16 @@ object Running {
       .ifM(
         Log[F].info(s"Received block ${PrettyPrinter.buildString(b.blockHash)} again."),
         for {
-          _ <- Log[F].info(s"Received ${PrettyPrinter.buildString(b)}.")
-          _ <- casperAdd(b)
-          _ <- RequestedBlocks[F].modify(_ - b.blockHash)
+          _      <- Log[F].info(s"Received ${PrettyPrinter.buildString(b)}.")
+          status <- casperAdd(b)
+          _      <- if (status.inDag) RequestedBlocks[F].modify(_ - b.blockHash) else noop[F]
         } yield ()
       )
-}
 
-class Running[F[_]: RPConfAsk: BlockStore: Monad: ConnectionsCell: TransportLayer: Log: Time: Running.RequestedBlocks](
-    casper: MultiParentCasper[F],
-    approvedBlock: ApprovedBlock,
-    theInit: F[Unit]
-) extends Engine[F] {
-  import Engine._
-  import Running._
-
-  private val blockLookup: BlockHash => F[Boolean] =
-    hash => BlockStore[F].get(hash).map(_.isDefined)
-
-  private def handleDoppelganger(peer: PeerNode): (BlockMessage, Validator) => F[Unit] =
-    (bm: BlockMessage, self: Validator) =>
-      if (bm.sender == self) {
-        val warnMessage =
-          s"There is another node $peer proposing using the same private key as you. Or did you restart your node?"
-        Log[F].warn(warnMessage)
-      } else ().pure[F]
-
-  def applicative: Applicative[F] = Applicative[F]
-
-  override def init: F[Unit] = theInit
-
-  override def handle(peer: PeerNode, msg: CasperMessage): F[Unit] = msg match {
-    case b: BlockMessage =>
-      handleBlockMessage[F](peer, b)(
-        casper.contains,
-        b => casper.addBlock(b, handleDoppelganger(peer))
-      )
-    case br: BlockRequest             => handleBlockRequest(peer, br)
-    case hbr: HasBlockRequest         => handleHasBlockRequest[F](peer, hbr)(blockLookup)
-    case hb: HasBlock                 => handleHasBlock[F](peer, hb)(casper.contains)
-    case fctr: ForkChoiceTipRequest   => handleForkChoiceTipRequest(peer, fctr)
-    case abr: ApprovedBlockRequest    => handleApprovedBlockRequest(peer, abr)
-    case na: NoApprovedBlockAvailable => logNoApprovedBlockAvailable[F](na.nodeIdentifer)
-    case _                            => noop
-  }
-
-  private def handleBlockRequest(peer: PeerNode, br: BlockRequest): F[Unit] =
+  def handleBlockRequest[F[_]: Monad: RPConfAsk: BlockStore: Log: TransportLayer](
+      peer: PeerNode,
+      br: BlockRequest
+  ): F[Unit] =
     for {
       local      <- RPConfAsk[F].reader(_.local)
       block      <- BlockStore[F].get(br.hash) // TODO: Refactor
@@ -236,10 +205,10 @@ class Running[F[_]: RPConfAsk: BlockStore: Monad: ConnectionsCell: TransportLaye
           }
     } yield ()
 
-  private def handleForkChoiceTipRequest(
+  def handleForkChoiceTipRequest[F[_]: Monad: RPConfAsk: Log: TransportLayer: BlockStore](
       peer: PeerNode,
       fctr: ForkChoiceTipRequest
-  ): F[Unit] =
+  )(casper: MultiParentCasper[F]): F[Unit] =
     for {
       _     <- Log[F].info(s"Received ForkChoiceTipRequest from $peer")
       tip   <- MultiParentCasper.forkChoiceTip(casper)
@@ -249,9 +218,10 @@ class Running[F[_]: RPConfAsk: BlockStore: Monad: ConnectionsCell: TransportLaye
       _     <- Log[F].info(s"Sending Block ${tip.blockHash} to $peer")
     } yield ()
 
-  private def handleApprovedBlockRequest(
+  def handleApprovedBlockRequest[F[_]: Monad: RPConfAsk: Log: TransportLayer](
       peer: PeerNode,
-      br: ApprovedBlockRequest
+      br: ApprovedBlockRequest,
+      approvedBlock: ApprovedBlock
   ): F[Unit] =
     for {
       local <- RPConfAsk[F].reader(_.local)
@@ -261,4 +231,40 @@ class Running[F[_]: RPConfAsk: BlockStore: Monad: ConnectionsCell: TransportLaye
       _     <- Log[F].info(s"Sending ApprovedBlock to $peer")
     } yield ()
 
+}
+
+class Running[F[_]: RPConfAsk: BlockStore: Monad: ConnectionsCell: TransportLayer: Log: Time: Running.RequestedBlocks](
+    casper: MultiParentCasper[F],
+    approvedBlock: ApprovedBlock,
+    theInit: F[Unit]
+) extends Engine[F] {
+  import Engine._
+  import Running._
+
+  private def casperAdd(peer: PeerNode): BlockMessage => F[BlockStatus] = {
+    def handleDoppelganger: (BlockMessage, Validator) => F[Unit] =
+      (bm: BlockMessage, self: Validator) =>
+        if (bm.sender == self) {
+          val warnMessage =
+            s"There is another node $peer proposing using the same private key as you. Or did you restart your node?"
+          Log[F].warn(warnMessage)
+        } else ().pure[F]
+
+    (b: BlockMessage) => casper.addBlock(b, handleDoppelganger)
+  }
+
+  def applicative: Applicative[F] = Applicative[F]
+
+  override def init: F[Unit] = theInit
+
+  override def handle(peer: PeerNode, msg: CasperMessage): F[Unit] = msg match {
+    case b: BlockMessage              => handleBlockMessage[F](peer, b)(casper.contains, casperAdd(peer))
+    case br: BlockRequest             => handleBlockRequest[F](peer, br)
+    case hbr: HasBlockRequest         => handleHasBlockRequest[F](peer, hbr)(casper.contains)
+    case hb: HasBlock                 => handleHasBlock[F](peer, hb)(casper.contains)
+    case fctr: ForkChoiceTipRequest   => handleForkChoiceTipRequest[F](peer, fctr)(casper)
+    case abr: ApprovedBlockRequest    => handleApprovedBlockRequest[F](peer, abr, approvedBlock)
+    case na: NoApprovedBlockAvailable => logNoApprovedBlockAvailable[F](na.nodeIdentifer)
+    case _                            => noop
+  }
 }
