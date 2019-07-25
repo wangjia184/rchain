@@ -98,7 +98,7 @@ object SystemProcesses {
 
       private def printStdOut(s: String): F[Unit] =
         for {
-          _ <- F.delay(Console.println(s))
+          _ <- F.delay(Console.println(s + s": ${System.currentTimeMillis()}"))
           _ <- F.delay(stdOutLogger.debug(s))
         } yield ()
 
