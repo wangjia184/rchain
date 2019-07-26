@@ -17,27 +17,19 @@ final case class RevGenerator(
 
   val path: String = "<synthetic in Rev.scala>"
 
+  val sourceVaults: String = userVaults
+    .map {
+      case Vault(revAddress, initialBalance) =>
+        s"""("${revAddress.toBase58}", $initialBalance)"""
+    }
+    .mkString("[", ", ", "]")
+
+  // From the initial mint amount we will subtract the total of the initial REV balance passed here.
   val code: String =
     s""" new rl(`rho:registry:lookup`), revVaultCh in {
        #   rl!(`rho:rchain:revVault`, *revVaultCh)
        #   | for (@(_, RevVault) <- revVaultCh) {
-       #     new genesisVaultCh in {
-       #       @RevVault!(
-       #         "findOrCreateGenesisVault",
-       #         "${genesisAddress.toBase58}",
-       #         $supply,
-       #         *genesisVaultCh
-       #       )
-       #       | for (@(true, genesisVault) <- genesisVaultCh) {
-       #         new genesisAuthKeyCh, deployerId(`rho:rchain:deployerId`) in {
-       #           @RevVault!("deployerAuthKey", *deployerId, *genesisAuthKeyCh)
-       #           | for (genesisVaultAuthKey <- genesisAuthKeyCh) {
-       #             ${concatenate(findOrCreate)} |
-       #             ${concatenate(transfer)}
-       #           }
-       #         }
-       #       }
-       #     }
+       #     @RevVault!("createGenesisVaults", $sourceVaults)
        #   }
        # }
      """.stripMargin('#')
@@ -47,29 +39,5 @@ final case class RevGenerator(
   val term: Par = ParBuilder[Coeval]
     .buildNormalizedTerm(code, normalizerEnv)
     .value()
-
-  private def findOrCreate(userVault: Vault): String =
-    s""" 
-       # @RevVault!(
-       #   "findOrCreate",
-       #   "${userVault.revAddress.toBase58}",
-       #   Nil
-       # )
-     """.stripMargin('#')
-
-  private def transfer(userVault: Vault): String =
-    s"""
-       # @genesisVault!(
-       #   "transfer",
-       #   "${userVault.revAddress.toBase58}",
-       #   ${userVault.initialBalance},
-       #   *genesisVaultAuthKey,
-       #   Nil
-       # )
-     """.stripMargin('#')
-
-  private def concatenate(f: Vault => String): String =
-    if (userVaults.nonEmpty) userVaults.map(f).mkString(" |\n\n")
-    else "Nil"
 
 }

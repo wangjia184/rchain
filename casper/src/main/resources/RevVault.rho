@@ -14,8 +14,8 @@
  9.  | 4,         | registry           | uri = rho:id:6zcfqnwnaqcwpeyuysx1rm48ndr6sgsbbgjuwf45i5nor3io7dr76j
  ----+------------+--------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------
  */
-new 
-  RevVault, rs(`rho:registry:insertSigned:secp256k1`), stdout(`rho:io:stdout`), uriOut,
+new
+  RevVault, rs(`rho:registry:insertSigned:secp256k1`), uriOut,
   rl(`rho:registry:lookup`), RevAddress(`rho:rev:address`), MakeMintCh, AuthKeyCh, EitherCh,
   _getIdentity,
   _makeVault,
@@ -82,27 +82,47 @@ in {
           new findOrCreateGenesisVault in {
             _getOrCreate!(ownerRevAddress, *findOrCreateGenesisVault, *ret) |
             for (retCh <- findOrCreateGenesisVault) {
-
               _makeVault!(ownerRevAddress, initialAmount, *retCh)
             }
           }
         } |
 
-        contract RevVault(@"findOrCreate", @ownerRevAddress, ret) = {
-          stdout!(["started-findOrCreate", ownerRevAddress])
-          | new createVault in {
-            _getOrCreate!(ownerRevAddress, *createVault, *ret) |
-            for (retCh <- createVault) {
-              _makeVault!(ownerRevAddress, 0, *retCh)
+        for(@"createGenesisVaults", @vaultList <- RevVault){
+          new loop in {
+            contract loop(@vaultList) = {
+              match vaultList {
+                [(revAddress, initialAmount) ...tail] => {
+                  new ret in {
+                    loop!(tail) |
+                    _create!(revAddress, initialAmount, *ret) |
+                    for(@(true, vault) <- ret; @vaultMap <- vaultMapStore){
+                      vaultMapStore!(vaultMap.set(revAddress, vault))
+                    }
+                  }
+                }
+                _ => Nil
+              }
+            } | loop!(vaultList)
+          }
+        } |
+
+        contract _create(@revAddress, @initialAmount, retCh) = {
+          new purseCh, eitherPurseCh, create in {
+            mint!("makePurse", initialAmount, *purseCh) |
+            @Either!("fromNillable <-", *purseCh, "Couldn't create purse", *eitherPurseCh) |
+            @Either!("map <-", *eitherPurseCh, *create, *retCh) |
+            for(@purse, ret <- create){
+              _newVault!(revAddress, purse, *ret)
             }
           }
         } |
 
-        contract _create(@revAddress, retCh) = {
-          new purseCh, eitherPurseCh, ret, cont in {
-            mint!("makePurse", 0, *purseCh) |
-            @Either!("fromNillable <-", *purseCh, "Couldn't create purse", *eitherPurseCh) |
-            @Either!("map <-", *eitherPurseCh, *cont, *ret)
+        contract RevVault(@"findOrCreate", @ownerRevAddress, ret) = {
+          new createVault in {
+            _getOrCreate!(ownerRevAddress, *createVault, *ret) |
+            for (retCh <- createVault) {
+              _makeVault!(ownerRevAddress, 0, *retCh)
+            }
           }
         } |
 
@@ -134,8 +154,7 @@ in {
         } |
 
         contract _makeVault(@ownerRevAddress, @initialAmount, ret) = {
-          stdout!(["_makeVault-started", ownerRevAddress])
-          | new revAddrCh, eitherRevAddrCh, purseCh, eitherPurseCh in {
+          new revAddrCh, eitherRevAddrCh, purseCh, eitherPurseCh in {
             @Either!("fromNillable", ownerRevAddress, "Required `revAddress` parameter was Nil", *eitherRevAddrCh) |
             mint!("makePurse", initialAmount, *purseCh) |
             @Either!("fromNillable <-", *purseCh, "Couldn't create purse", *eitherPurseCh) |
@@ -144,8 +163,7 @@ in {
         } |
 
         contract _newVault(@ownRevAddress, purse, ret) = {
-          stdout!(["_newVault-started", ownRevAddress])
-          | new revVault in {
+          new revVault in {
 
             ret!(bundle+{*revVault}) |
 
@@ -155,8 +173,7 @@ in {
 
             contract revVault(@"transfer", @revAddress, @amount, authKey, ret) = {
 
-              stdout!(["transfer-started", revAddress, amount])
-              | new
+              new
                 revAddressValid, revAddressValidEither, amountNonNegative,
                 authKeyValidCh, authKeyValidEitherCh,
                 parametersOkCh, parametersAndAuthOkCh,
@@ -213,5 +230,5 @@ in {
     }
   }
 }
-  
-  
+
+
