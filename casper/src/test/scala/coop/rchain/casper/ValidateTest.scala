@@ -3,13 +3,15 @@ package coop.rchain.casper
 import java.nio.file.Files
 
 import scala.collection.immutable.HashMap
-
 import cats.Monad
 import cats.implicits._
-
 import coop.rchain.blockstorage.BlockStore
 import coop.rchain.blockstorage.dag.IndexedBlockDagStorage
-import coop.rchain.casper.helper.{BlockDagStorageFixture, BlockGenerator}
+import coop.rchain.casper.helper.{
+  BlockDagStorageFixture,
+  BlockGenerator,
+  UnlimitedParentsEstimatorFixture
+}
 import coop.rchain.casper.helper.BlockGenerator._
 import coop.rchain.casper.helper.BlockUtil.generateValidator
 import coop.rchain.casper.protocol._
@@ -26,7 +28,6 @@ import coop.rchain.p2p.EffectsTestInstances.LogStub
 import coop.rchain.rholang.interpreter.Runtime
 import coop.rchain.shared.Time
 import coop.rchain.shared.scalatestcontrib._
-
 import com.google.protobuf.ByteString
 import monix.eval.Task
 import monix.execution.Scheduler.Implicits.global
@@ -37,13 +38,12 @@ class ValidateTest
     with Matchers
     with BeforeAndAfterEach
     with BlockGenerator
-    with BlockDagStorageFixture {
+    with BlockDagStorageFixture
+    with UnlimitedParentsEstimatorFixture {
   import InvalidBlock._
   import ValidBlock._
 
-  implicit val log                        = new LogStub[Task]
-  implicit val noopMetrics: Metrics[Task] = new Metrics.MetricsNOP[Task]
-  implicit val span: Span[Task]           = new NoopSpan[Task]
+  implicit override val log: LogStub[Task] = new LogStub[Task]
 
   override def beforeEach(): Unit = {
     log.reset()

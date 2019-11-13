@@ -35,7 +35,7 @@ object BlockCreator {
    *  3. Extract all valid deploys that aren't already in all ancestors of S (the parents).
    *  4. Create a new block that contains the deploys from the previous step.
    */
-  def createBlock[F[_]: Sync: Log: Time: BlockStore: SynchronyConstraintChecker](
+  def createBlock[F[_]: Sync: Log: Time: BlockStore: SynchronyConstraintChecker: Estimator](
       dag: BlockDagRepresentation[F],
       genesis: BlockMessage,
       validatorIdentity: ValidatorIdentity,
@@ -45,7 +45,6 @@ object BlockCreator {
       runtimeManager: RuntimeManager[F]
   )(
       implicit state: CasperStateCell[F],
-      metricsF: Metrics[F],
       spanF: Span[F]
   ): F[CreateBlockStatus] =
     spanF.trace(CreateBlockMetricsSource) {
@@ -53,7 +52,7 @@ object BlockCreator {
 
       val validator = ByteString.copyFrom(validatorIdentity.publicKey.bytes)
       for {
-        tipHashes             <- Estimator.tips(dag, genesis)
+        tipHashes             <- Estimator[F].tips(dag, genesis)
         _                     <- spanF.mark("after-estimator")
         parentMetadatas       <- EstimatorHelper.chooseNonConflicting(tipHashes, dag)
         maxBlockNumber        = ProtoUtil.maxBlockNumberMetadata(parentMetadatas)

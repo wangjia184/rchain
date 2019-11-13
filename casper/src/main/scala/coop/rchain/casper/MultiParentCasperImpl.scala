@@ -46,7 +46,7 @@ object CasperState {
   type CasperStateCell[F[_]] = Cell[F, CasperState]
 }
 
-class MultiParentCasperImpl[F[_]: Sync: Concurrent: Log: Time: SafetyOracle: LastFinalizedBlockCalculator: BlockStore: BlockDagStorage: LastFinalizedStorage: CommUtil: EventPublisher: SynchronyConstraintChecker](
+class MultiParentCasperImpl[F[_]: Sync: Concurrent: Log: Time: SafetyOracle: LastFinalizedBlockCalculator: BlockStore: BlockDagStorage: LastFinalizedStorage: CommUtil: EventPublisher: SynchronyConstraintChecker: Estimator](
     validatorId: Option[ValidatorIdentity],
     genesis: BlockMessage,
     postGenesisStateHash: StateHash,
@@ -224,7 +224,7 @@ class MultiParentCasperImpl[F[_]: Sync: Concurrent: Log: Time: SafetyOracle: Las
     } yield deploy.sig
 
   def estimator(dag: BlockDagRepresentation[F]): F[IndexedSeq[BlockHash]] =
-    Estimator.tips(dag, genesis)
+    Estimator[F].tips(dag, genesis)
 
   def createBlock: F[CreateBlockStatus] =
     (validatorId match {
