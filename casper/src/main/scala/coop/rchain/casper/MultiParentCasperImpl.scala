@@ -110,8 +110,12 @@ class MultiParentCasperImpl[F[_]: Sync: Concurrent: Log: Time: SafetyOracle: Las
     } yield status
   }.timer("add-block-time")
 
-  private def updateLastFinalizedBlock(newBlock: BlockMessage): F[Unit] =
-    lastFinalizedBlock.whenA(newBlock.body.state.blockNumber % finalizationRate == 0)
+  private def updateLastFinalizedBlock(newBlock: BlockMessage): F[Unit] = {
+    val blockNumber = newBlock.body.state.blockNumber
+    val isUpdated   = if (blockNumber % finalizationRate == 0) "Updating" else "Postponing"
+    Log[F].info(s"Trying to update last finalized block on block number $blockNumber... $isUpdated") >>
+      lastFinalizedBlock.whenA(blockNumber % finalizationRate == 0)
+  }
 
   private def internalAddBlock(
       b: BlockMessage,
@@ -218,6 +222,7 @@ class MultiParentCasperImpl[F[_]: Sync: Concurrent: Log: Time: SafetyOracle: Las
 
   def lastFinalizedBlock: F[BlockMessage] =
     for {
+      _                      <- Log[F].info("Updating last finalized block...")
       dag                    <- blockDag
       lastFinalizedBlockHash <- LastFinalizedStorage[F].get(genesis)
       updatedLastFinalizedBlockHash <- LastFinalizedBlockCalculator[F]
