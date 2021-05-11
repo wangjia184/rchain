@@ -46,15 +46,17 @@ object StacksafeScalapbGenerator extends CodeGenApp {
   // Adapted from scalapb ProtobufGenerator
   // https://github.com/scalapb/ScalaPB/blob/v0.10.8/compiler-plugin/src/main/scala/scalapb/compiler/ProtobufGenerator.scala#L1732
   def process(request: CodeGenRequest): CodeGenResponse =
+
     ProtobufGenerator.parseParameters(request.parameter) match {
       case Right(params) =>
         try {
-          val implicits = new DescriptorImplicits(params, request.allProtos)
+          val implicits = DescriptorImplicits.fromCodeGenRequest(params, request)
           // Inserted custom printer
+          //val generator = new ProtobufGenerator(params, implicits)
           val generator = new StacksafeMessagePrinter(params, implicits)
           val validator = new ProtoValidation(implicits)
           validator.validateFiles(request.allProtos)
-          import implicits.FileDescriptorPimp
+          import implicits.ExtendedFileDescriptor
           val files = request.filesToGenerate.flatMap { file =>
             if (file.scalaOptions.getSingleFile)
               generator.generateSingleScalaFileForFileDescriptor(file)
@@ -75,7 +77,7 @@ class StacksafeMessagePrinter(
     implicits: DescriptorImplicits
 ) extends ProtobufGenerator(params, implicits) {
 
-  import DescriptorImplicits.AsSymbolPimp
+  import DescriptorImplicits.AsSymbolExtension
   import implicits._
 
   // Override printing of the whole message
@@ -166,10 +168,18 @@ class StacksafeMessagePrinter(
             printer.add(
               s"val __${field.scalaName} = (scala.collection.immutable.Map.newBuilder[${field.mapType.keyType}, ${field.mapType.valueType}] ++= this.${field.scalaName.asSymbol})"
             )
-          else
+          else {
+            val t = if (field.collectionType == /* ScalaSeq */ "_root_.scala.Seq") /* ScalaVector */ "_root_.scala.collection.immutable.Vector" else field.collectionType
+            var s = if (!field.isMapField)
+              s"$t.newBuilder[${field.singleScalaTypeName}]"
+            else {
+              s"$t.newBuilder[${field.mapType.keyType}, ${field.mapType.valueType}]"
+            }
+
             printer.add(
-              s"val __${field.scalaName} = (${field.collectionBuilder} ++= this.${field.scalaName.asSymbol})"
+              s"val __${field.scalaName} = (${s} ++= this.${field.scalaName.asSymbol})"
             )
+          }
       )
       .when(message.preservesUnknownFields) { _ =>
         throw new UnsupportedOperationException("Unknown fields are not supported")

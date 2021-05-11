@@ -101,7 +101,7 @@ object Dependencies {
     "org.typelevel" % "jawn-parser_2.12" % "1.0.0",
     // Added to resolve conflicts in scalapb plugin v0.10.8
     "org.codehaus.mojo"      % "animal-sniffer-annotations" % "1.18",
-    "com.google.protobuf"    % "protobuf-java"              % "3.12.0",
+    "com.google.protobuf"    % "protobuf-java"              % "3.15.0",
     "org.scala-lang.modules" %% "scala-collection-compat"   % "2.2.0",
     // Strange version conflict, it requires the same version but in square brackets (range?).
     // e.g. io.grpc:grpc-core:1.30.2 ([1.30.2] wanted)

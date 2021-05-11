@@ -4,6 +4,10 @@ import Rholang._
 import NativePackagerHelper._
 import com.typesafe.sbt.packager.docker._
 
+Compile / PB.targets := Seq(
+  scalapb.gen() -> (Compile / sourceManaged).value / "scalapb"
+)
+
 //allow stopping sbt tasks using ctrl+c without killing sbt itself
 Global / cancelable := true
 
@@ -198,6 +202,7 @@ lazy val comm = (project in file("comm"))
       monix,
       guava
     ),
+    PB.protocExecutable := file("/Users/jerry/protoc"),
     PB.targets in Compile := Seq(
       PB.gens.java                                      -> (sourceManaged in Compile).value,
       scalapb.gen(javaConversions = true, grpc = false) -> (sourceManaged in Compile).value,
@@ -235,6 +240,7 @@ lazy val models = (project in file("models"))
       scalacheckShapeless,
       scalapbRuntimegGrpc
     ),
+    PB.protocExecutable := file("/Users/jerry/protoc"),
     PB.targets in Compile := Seq(
       coop.rchain.scalapb.gen(flatPackage = true, grpc = false) -> (sourceManaged in Compile).value,
       grpcmonix.generators.gen()                                -> (sourceManaged in Compile).value
@@ -270,6 +276,7 @@ lazy val node = (project in file("node"))
         circeGenericExtras,
         pureconfig
       ),
+    PB.protocExecutable := file("/Users/jerry/protoc"),
     PB.targets in Compile := Seq(
       PB.gens.java -> (sourceManaged in Compile).value / "protobuf",
       scalapb
